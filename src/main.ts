@@ -6,19 +6,14 @@ const { createJwtVerifier } = await import("@famashines/ai-systems-kit/auth");
 const { loadConfig } = await import("@famashines/ai-systems-kit/config");
 const { createLogger, startTelemetry } = await import("@famashines/ai-systems-kit/observability");
 const { createApp } = await import("./app.ts");
-const { Env } = await import("./env.ts");
+const { Env, verifierOptions } = await import("./env.ts");
 
 const config = loadConfig(Env);
 const { SERVICE_NAME: service, RELEASE: release } = config;
 const telemetry = startTelemetry({ serviceName: service, release });
 const logger = createLogger({ service, release, level: config.LOG_LEVEL });
 const app = createApp({
-  verify: createJwtVerifier({
-    issuer: config.OIDC_ISSUER,
-    audience: config.OIDC_AUDIENCE,
-    requiredRole: config.REQUIRED_ROLE,
-    logger,
-  }),
+  verify: createJwtVerifier({ ...verifierOptions(config), logger }),
   orchestrationUrl: config.ORCHESTRATION_URL,
   projectionsUrl: config.PROJECTIONS_URL,
   logger,
