@@ -116,6 +116,7 @@ const sign = (claims: Record<string, unknown> = {}): Promise<string> =>
     iat: now(),
     exp: now() + 300,
     typ: "Bearer",
+    azp: "ai-systems-app",
     realm_access: { roles: ["owner"] },
     ...claims,
   })
@@ -329,6 +330,7 @@ describe("POST /api/tasks", () => {
           code: "conflict",
           detail: "The key was used for another command",
           instance: "/internal/commands/submit-task",
+          stack: "Error at /app/src/x.ts:1",
         },
         "application/problem+json",
       );
@@ -339,6 +341,43 @@ describe("POST /api/tasks", () => {
     const problem = await problemOf(response);
     assert.equal(problem.code, "conflict");
     assert.equal(problem.instance, "/api/tasks");
+    assert.deepEqual(Object.keys(problem).sort(), [
+      "code",
+      "detail",
+      "instance",
+      "status",
+      "title",
+      "type",
+    ]);
+  });
+
+  test("other upstream statuses give 502 with a generic detail and no upstream fields", async () => {
+    const call = await start();
+    for (const status of [500, 401, 403, 404, 429, 503]) {
+      orchestration.set((_seen, response) => {
+        json(
+          response,
+          status,
+          {
+            type: "about:blank",
+            title: "Internal Server Error",
+            status,
+            code: "internal",
+            detail: "password=hunter2 at mongodb://orchestration:secret@mongo",
+            stack: "Error: boom\n    at /app/src/main.ts:10",
+            internalUrl: "http://ai-systems-orchestration:8080/internal/commands/submit-task",
+          },
+          "application/problem+json",
+        );
+      });
+      const response = await call("/api/tasks", await submit({ text: "Hi" }));
+      assert.equal(response.status, 502, String(status));
+      const text = await response.text();
+      assert.doesNotMatch(text, /hunter2|secret|stack|internalUrl|ai-systems-orchestration/);
+      const problem = JSON.parse(text) as { code: string; detail: string };
+      assert.equal(problem.code, "unavailable");
+      assert.equal(problem.detail, "The upstream service gave an answer that is not valid");
+    }
   });
 
   test("orchestration down or too slow gives 503", async () => {
@@ -475,15 +514,22 @@ describe("GET /api/tasks", () => {
     });
     const call = await start();
     const correlationId = randomUUID();
-    const before = randomUUID();
-    const response = await call(`/api/tasks?limit=20&before=${before}&other=1`, {
-      headers: await authed({ "x-correlation-id": correlationId }),
-    });
+    const before = "2026-10-31T08:00:00.000Z";
+    const beforeId = randomUUID();
+    const response = await call(
+      `/api/tasks?limit=100&before=${before}&beforeId=${beforeId}&other=1`,
+      {
+        headers: await authed({ "x-correlation-id": correlationId }),
+      },
+    );
     assert.equal(response.status, 200);
     assert.deepEqual(await response.json(), oneTask);
     const sent = projections.seen[0];
     assert.ok(sent);
-    assert.equal(sent.url, `/internal/tasks?limit=20&before=${before}`);
+    assert.equal(
+      sent.url,
+      `/internal/tasks?limit=100&before=${encodeURIComponent(before)}&beforeId=${beforeId}`,
+    );
     assert.equal(sent.headers["x-correlation-id"], correlationId);
     await call("/api/tasks", { headers: await authed() });
     assert.equal(projections.seen[1]?.url, "/internal/tasks");
@@ -491,7 +537,16 @@ describe("GET /api/tasks", () => {
 
   test("a bad query gives 400", async () => {
     const call = await start();
-    for (const query of ["limit=0", "limit=abc", "limit=1000", `before=${"x".repeat(201)}`]) {
+    for (const query of [
+      "limit=0",
+      "limit=abc",
+      "limit=101",
+      "limit=01",
+      "before=yesterday",
+      "before=2026-10-31",
+      `beforeId=${randomUUID().toUpperCase()}`,
+      "beforeId=1",
+    ]) {
       const response = await call(`/api/tasks?${query}`, { headers: await authed() });
       assert.equal(response.status, 400, query);
     }
@@ -519,6 +574,27 @@ describe("GET /api/tasks", () => {
     const problem = (await refused.json()) as { errors: unknown[]; instance: string };
     assert.equal(problem.errors.length, 1);
     assert.equal(problem.instance, "/api/tasks");
+  });
+});
+
+describe("upstream body limit", () => {
+  test("an answer over 1 MiB gives 502, with or without content-length", async () => {
+    const call = await start();
+    const big = JSON.stringify({ items: [], headSeq: 0, pad: "x".repeat(1024 * 1024) });
+    projections.set((_seen, response) => {
+      response.writeHead(200, { "content-type": "application/json" }).end(big);
+    });
+    assert.equal((await call("/api/tasks", { headers: await authed() })).status, 502);
+    projections.set((_seen, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      for (let index = 0; index < 20; index += 1) response.write("x".repeat(64 * 1024));
+      response.end();
+    });
+    assert.equal((await call("/api/tasks", { headers: await authed() })).status, 502);
+    projections.set((_seen, response) => {
+      json(response, 200, { items: [], headSeq: 0, pad: "x".repeat(1000 * 1024) });
+    });
+    assert.equal((await call("/api/tasks", { headers: await authed() })).status, 200);
   });
 });
 
