@@ -9,8 +9,10 @@ app --HTTPS /api--> Traefik --> api-gateway
                                   | bearerHook (kit/auth): 401, 403
                                   | rate limit for each subject: 429
                                   | zod checks: 400
-                                  +--POST--> orchestration /internal/commands/submit-task
-                                  +--GET---> projections   /internal/tasks
+                                  +--POST--> orchestration    /internal/commands/submit-task
+                                  +--POST--> conversation-hub /internal/commands/post-owner-message
+                                  +--GET---> projections      /internal/tasks
+                                  +--GET---> projections      /internal/conversations/<id>/messages
 ```
 
 ## Routes
@@ -20,6 +22,8 @@ app --HTTPS /api--> Traefik --> api-gateway
 | `GET /health`, `GET /ready`, `GET /metrics` | kit probes and Prometheus metrics, no token |
 | `POST /api/tasks`                           | submit a task (below)                       |
 | `GET /api/tasks?limit=&before=`             | the task list (below)                       |
+| `POST /api/conversations/:id/messages`      | post an owner message to a thread (below)   |
+| `GET /api/conversations/:id/messages`       | the messages of a thread (below)            |
 
 All other paths need a valid token too: with no valid token, an unknown
 path gives 401, not 404 (the hooks run before routing).
@@ -90,6 +94,54 @@ WebSocket topic.
   `TaskListResultV1`. The answer is checked with zod; a bad answer is 502.
   Problem JSON passes through as above.
 
+### `POST /api/conversations/:id/messages`
+
+Request:
+
+- `:id` is the `conversationId`: a lower-case UUID v4, else 400 with the
+  path `params.id`. The first message to a new id starts the thread.
+- Header `Idempotency-Key`: the same rule as `POST /api/tasks`.
+- Body: `{ text, taskId?, newTask? }`, the fields of
+  `PostOwnerMessageCommandPayloadV1` (contracts v0.3.0). `newTask` is
+  `false` by default. `taskId` together with `newTask: true` is refused
+  (400, path `body.taskId`). A `conversationId` in the body is replaced by
+  `:id`.
+
+The gateway sends this `CommandEnvelopeV1` to
+`POST <CONVERSATION_HUB_URL>/internal/commands/post-owner-message`:
+
+```json
+{
+  "commandId": "<Idempotency-Key>",
+  "type": "conversation.PostOwnerMessage",
+  "actor": { "kind": "owner", "id": "<sub of the token>" },
+  "payload": { "conversationId": "<:id>", "text": "...", "newTask": false }
+}
+```
+
+| conversation-hub answer                                          | Gateway answer                                |
+| ---------------------------------------------------------------- | --------------------------------------------- |
+| 201 or 200 with `{ conversationId, messageId, intent, taskId? }` | 202, same body                                |
+| a body with another `conversationId`                             | 502 `unavailable`                             |
+| problem JSON with 400, 409, 413, 415 or 422                      | same status and problem (allowed fields only) |
+| other answers, size, timeout and network errors                  | as for `POST /api/tasks`                      |
+
+`intent` is `new_task` or `steer` (with the `taskId` that the message
+steers). conversation-hub gives 409 `conflict` for a `taskId` that is not
+a task of the thread. The same key again gives the same message.
+
+### `GET /api/conversations/:id/messages`
+
+- `:id` as above. Query: `limit`, `before` and `beforeId`, the same rules
+  as `GET /api/tasks`.
+- Forwards to `GET <PROJECTIONS_URL>/internal/conversations/<id>/messages`
+  and gives `ConversationThreadResultV1` (newest first). The answer is
+  checked with zod; a bad answer is 502.
+- projections does not have this path yet: the chat read model is task
+  M2-07. Until then the route gives 502 (projections answers 404). A thread
+  with no messages must be a 200 with empty `items` from projections,
+  because the gateway does not pass a 404 through.
+
 ### Rate limit
 
 A token bucket for each `sub`: 20 requests each second, burst 40. Over
@@ -110,6 +162,7 @@ Read once at start with zod (kit/config); a bad value stops the process.
 | Variable                                                            | Default                                             |
 | ------------------------------------------------------------------- | --------------------------------------------------- |
 | `ORCHESTRATION_URL`                                                 | required, `http` or `https` origin                  |
+| `CONVERSATION_HUB_URL`                                              | `http://ai-systems-conversation-hub:8080`           |
 | `PROJECTIONS_URL`                                                   | required, `http` or `https` origin                  |
 | `OIDC_ISSUER`                                                       | `https://auth.famashines.com/realms/ai-systems`     |
 | `OIDC_JWKS_URL`                                                     | none: `<OIDC_ISSUER>/protocol/openid-connect/certs` |

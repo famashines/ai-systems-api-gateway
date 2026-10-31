@@ -1,6 +1,9 @@
 import {
   CommandEnvelopeV1,
+  ConversationThreadResultV1,
   Id,
+  MessageIntent,
+  PostOwnerMessageCommandPayloadV1,
   ProblemJson,
   SubmitTaskCommandPayloadV1,
   TaskListResultV1,
@@ -25,6 +28,7 @@ import { rateLimit, type RateLimitOptions } from "./rate-limit.ts";
 export interface AppOptions {
   verify: JwtVerifier;
   orchestrationUrl: string;
+  conversationHubUrl: string;
   projectionsUrl: string;
   logger: ServiceOptions["logger"];
   metrics?: ServiceOptions["metrics"];
@@ -35,6 +39,15 @@ export interface AppOptions {
 }
 
 const Accepted = z.object({ taskId: Id, version: z.int().min(1) });
+
+const Posted = z.object({
+  conversationId: Id,
+  messageId: Id,
+  intent: MessageIntent,
+  taskId: Id.exactOptional(),
+});
+
+const ConversationParams = z.object({ id: Id });
 
 const ListQuery = z.object({
   limit: z
@@ -145,24 +158,42 @@ export function createApp(options: AppOptions): Service {
     };
   }
 
+  function idempotencyKey(request: Request): string {
+    const key = Id.safeParse(request.headers["idempotency-key"]);
+    if (!key.success) {
+      throw new ValidationError("The request is not valid", [
+        {
+          path: "headers.idempotency-key",
+          code: "invalid_format",
+          message: "The Idempotency-Key header must be a lower-case UUID v4",
+        },
+      ]);
+    }
+    return key.data;
+  }
+
+  async function list<T>(request: Request, path: string, schema: z.ZodType<T>): Promise<Reply> {
+    const { query } = await validate(request, { query: ListQuery });
+    const url = new URL(path, options.projectionsUrl);
+    for (const [name, value] of Object.entries(query)) {
+      if (value !== undefined) url.searchParams.set(name, value);
+    }
+    const upstream = await call("projections", url, request);
+    if (upstream.status !== 200) return problem(upstream, request);
+    const result = schema.safeParse(upstream.body);
+    if (!result.success) throw badGateway();
+    return { body: result.data };
+  }
+
   const routes: Route[] = [
     {
       method: "POST",
       path: "/api/tasks",
       handler: async (request) => {
-        const key = Id.safeParse(request.headers["idempotency-key"]);
-        if (!key.success) {
-          throw new ValidationError("The request is not valid", [
-            {
-              path: "headers.idempotency-key",
-              code: "invalid_format",
-              message: "The Idempotency-Key header must be a lower-case UUID v4",
-            },
-          ]);
-        }
+        const commandId = idempotencyKey(request);
         const { body } = await validate(request, { body: SubmitTaskCommandPayloadV1 });
         const command = CommandEnvelopeV1(SubmitTaskCommandPayloadV1).parse({
-          commandId: key.data,
+          commandId,
           type: "orchestration.SubmitTask",
           actor: { kind: "owner", id: subjectOf(request).sub },
           payload: body,
@@ -186,17 +217,50 @@ export function createApp(options: AppOptions): Service {
     {
       method: "GET",
       path: "/api/tasks",
+      handler: (request) => list(request, "/internal/tasks", TaskListResultV1),
+    },
+    {
+      method: "POST",
+      path: "/api/conversations/:id/messages",
       handler: async (request) => {
-        const { query } = await validate(request, { query: ListQuery });
-        const url = new URL("/internal/tasks", options.projectionsUrl);
-        for (const [name, value] of Object.entries(query)) {
-          if (value !== undefined) url.searchParams.set(name, value);
+        const commandId = idempotencyKey(request);
+        const { body } = await validate(request, {
+          params: ConversationParams,
+          body: z
+            .looseObject({})
+            .transform((message) => ({ ...message, conversationId: request.params.id }))
+            .pipe(PostOwnerMessageCommandPayloadV1),
+        });
+        const command = CommandEnvelopeV1(PostOwnerMessageCommandPayloadV1).parse({
+          commandId,
+          type: "conversation.PostOwnerMessage",
+          actor: { kind: "owner", id: subjectOf(request).sub },
+          payload: body,
+        });
+        const upstream = await call(
+          "conversation-hub",
+          new URL("/internal/commands/post-owner-message", options.conversationHubUrl),
+          request,
+          command,
+        );
+        if (upstream.status !== 200 && upstream.status !== 201) return problem(upstream, request);
+        const posted = Posted.safeParse(upstream.body);
+        if (!posted.success || posted.data.conversationId !== body.conversationId) {
+          throw badGateway();
         }
-        const upstream = await call("projections", url, request);
-        if (upstream.status !== 200) return problem(upstream, request);
-        const result = TaskListResultV1.safeParse(upstream.body);
-        if (!result.success) throw badGateway();
-        return { body: result.data };
+        return { status: 202, body: posted.data };
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/conversations/:id/messages",
+      handler: async (request) => {
+        const { params } = await validate(request, { params: ConversationParams });
+        return list(
+          request,
+          `/internal/conversations/${params.id}/messages`,
+          ConversationThreadResultV1,
+        );
       },
     },
   ];

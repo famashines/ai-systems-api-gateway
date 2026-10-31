@@ -15,6 +15,7 @@ const logger = createLogger({ service, release, level: config.LOG_LEVEL });
 const app = createApp({
   verify: createJwtVerifier({ ...verifierOptions(config), logger }),
   orchestrationUrl: config.ORCHESTRATION_URL,
+  conversationHubUrl: config.CONVERSATION_HUB_URL,
   projectionsUrl: config.PROJECTIONS_URL,
   logger,
   metrics: telemetry.metricsHandler,

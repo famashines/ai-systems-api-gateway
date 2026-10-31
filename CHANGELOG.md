@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `POST /api/conversations/:id/messages`: `Idempotency-Key` check,
+  `PostOwnerMessage` command to conversation-hub, 202 with
+  `{ conversationId, messageId, intent, taskId? }`.
+- `GET /api/conversations/:id/messages`: the thread from projections
+  (`/internal/conversations/:id/messages`, task M2-07), checked with
+  `ConversationThreadResultV1`.
+- New env `CONVERSATION_HUB_URL`, default
+  `http://ai-systems-conversation-hub:8080`.
+- Contracts v0.3.0 and kit v0.3.0.
+
 - Optional `OIDC_JWKS_URL`: the verifier reads the keys from it; the `iss`
   check stays `OIDC_ISSUER`.
 - Release workflow: image, CycloneDX SBOM, grype scan, push to GHCR
