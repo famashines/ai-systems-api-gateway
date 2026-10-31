@@ -10,3 +10,9 @@
 - Rate limit for each subject (token bucket, 20 each second, burst 40).
 - Dockerfile (Node 26 slim by digest, uid 1000, read-only root file
   system) and CI (gitleaks, verify, audit, image build and smoke test).
+- Review fixes: problems pass through only for 400, 409, 413, 415 and 422,
+  with allowed fields only; other upstream answers give 502. Upstream
+  answers over 1 MiB give 502. `GET /api/tasks` takes `limit` 1 to 100,
+  `before` (Timestamp) and `beforeId` (Id). The JWKS failure log goes to
+  the service logger. Image: `npm ci --omit=dev --omit=optional`, no npm
+  or npx, `ENTRYPOINT`, early exit on a signal during start.

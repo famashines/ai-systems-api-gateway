@@ -57,21 +57,32 @@ The gateway sends this `CommandEnvelopeV1` to
 }
 ```
 
-| Orchestration answer                  | Gateway answer                                          |
-| ------------------------------------- | ------------------------------------------------------- |
-| 201 or 200 with `{ taskId, version }` | 202, same body, `Location: /api/tasks/<taskId>`         |
-| problem JSON (4xx or 5xx)             | same status and problem, `instance` is the gateway path |
-| other answer                          | 502 `unavailable`                                       |
-| no answer in 5 s, or a network error  | 503 `unavailable`                                       |
+| Orchestration answer                        | Gateway answer                                  |
+| ------------------------------------------- | ----------------------------------------------- |
+| 201 or 200 with `{ taskId, version }`       | 202, same body, `Location: /api/tasks/<taskId>` |
+| problem JSON with 400, 409, 413, 415 or 422 | same status and problem (allowed fields only)   |
+| other answer (also 401, 403, 500, 503)      | 502 `unavailable`, generic detail               |
+| answer larger than 1 MiB                    | 502 `unavailable`                               |
+| no answer in 5 s, or a network error        | 503 `unavailable`                               |
+
+A problem that passes through keeps only `type`, `title`, `status`,
+`code`, `detail` and `errors`; `instance` is the gateway path. Other
+upstream fields (for example a stack or an internal URL) never reach the
+client. The gateway logs the status of a refused answer at warn.
 
 The same key again gives the same task: orchestration stores the
 `commandId` with its answer and replays it (200).
 
+`Location` is the URL of the task for later. `GET /api/tasks/<taskId>`
+does not exist in M1 (it gives 404); use `GET /api/tasks` or the
+WebSocket topic.
+
 ### `GET /api/tasks`
 
-- Query: `limit` (1 to 999, digits only) and `before` (1 to 200
-  characters), both optional. Other query keys are dropped. Projections
-  checks the values and their range.
+- Query, all optional: `limit` (1 to 100), `before` (contracts
+  `Timestamp`, ISO 8601 UTC) and `beforeId` (contracts `Id`, lower-case
+  UUID v4, for tasks with the same time). Else 400. Other query keys are
+  dropped.
 - Forwards to `GET <PROJECTIONS_URL>/internal/tasks` and gives
   `TaskListResultV1`. The answer is checked with zod; a bad answer is 502.
   Problem JSON passes through as above.
@@ -128,17 +139,22 @@ docker run --read-only -p 8080:8080 \
 The image runs `node src/main.ts` with type stripping (no build step) as
 uid 1000 on `node:26.13.0-slim` (pinned by digest). It writes no files,
 so the root file system can be read-only. The build stage uses the full
-`node` image, because npm needs git for the kit and contracts.
+`node` image, because npm needs git for the kit and contracts. It installs
+with `--omit=dev --omit=optional`, so no dev or optional peer packages
+are in the image. The runtime stage has no npm and no npx. `node` is the
+`ENTRYPOINT` and PID 1: a SIGTERM or SIGINT before the server listens
+exits with 143 at once; after that, the kit shutdown handles it.
 
 ## Known limits
 
-- The rate limit map has one entry for each `sub` that called. With one
-  owner, that is one entry. Add a clean-up when there are many users.
+- The rate limit map has one entry for each `sub` with the owner role, so
+  its size is the number of owner users (one).
 - The rate limit is for each pod. With two pods the real limit is double.
   Traefik has the limit for the whole Ingress (ARCHITECTURE 11.1).
 - Requests with a bad token are not rate limited here (there is no
   subject). Traefik limits them. A bad token costs one RS256 check, and an
-  unknown `kid` causes at most one JWKS fetch each 30 s.
+  unknown `kid` causes at most one JWKS fetch each 30 s (each 5 s while
+  Keycloak is down).
 
 ## Commands
 
