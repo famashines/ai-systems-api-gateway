@@ -1,0 +1,45 @@
+{
+  "name": "@famashines/ai-systems-api-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "description": "HTTP API gateway of ai-systems",
+  "license": "UNLICENSED",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/famashines/ai-systems-api-gateway.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "check": "node node_modules/typescript-7/bin/tsc --noEmit",
+    "lint": "eslint . && prettier --check .",
+    "format": "prettier --write .",
+    "test": "node --test --experimental-test-coverage --test-coverage-lines=70 --test-coverage-include='src/**/*.ts' --test-coverage-exclude='src/**/*.test.ts' 'src/**/*.test.ts'",
+    "verify": "npm run check && npm run lint && npm test"
+  },
+  "overrides": {
+    "@typescript/old": "npm:typescript@6.0.3"
+  },
+  "dependencies": {
+    "@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.1.0",
+    "@famashines/ai-systems-kit": "github:famashines/ai-systems-kit#e4572952767988d1c9a696f90260c27fdbdd9634",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "26.6.6",
+    "eslint": "10.14.0",
+    "jose": "6.2.14",
+    "prettier": "3.9.10",
+    "typescript": "npm:@typescript/typescript6@6.0.2",
+    "typescript-7": "npm:typescript@7.0.2",
+    "typescript-eslint": "8.72.1"
+  },
+  "allowScripts": {
+    "github:famashines/ai-systems-kit#e4572952767988d1c9a696f90260c27fdbdd9634": true,
+    "github:famashines/ai-systems-contracts#09f6c8c5385e90dd96cdc81fbd5c8c44d7e92257": true,
+    "protobufjs": false
+  }
+}
