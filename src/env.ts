@@ -7,6 +7,7 @@ const httpUrl = z.url({ protocol: /^https?$/ });
 export const Env = commonEnv.extend({
   SERVICE_NAME: z.string().min(1).default("ai-systems-api-gateway"),
   ORCHESTRATION_URL: httpUrl,
+  CONVERSATION_HUB_URL: httpUrl.default("http://ai-systems-conversation-hub:8080"),
   PROJECTIONS_URL: httpUrl,
   OIDC_ISSUER: httpUrl.default("https://auth.famashines.com/realms/ai-systems"),
   OIDC_JWKS_URL: httpUrl.optional(),

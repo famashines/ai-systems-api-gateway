@@ -24,8 +24,8 @@
     "@typescript/old": "npm:typescript@6.0.3"
   },
   "dependencies": {
-    "@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.1.0",
-    "@famashines/ai-systems-kit": "github:famashines/ai-systems-kit#v0.2.0",
+    "@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.3.0",
+    "@famashines/ai-systems-kit": "github:famashines/ai-systems-kit#v0.3.0",
     "zod": "4.6.7"
   },
   "devDependencies": {
@@ -38,8 +38,8 @@
     "typescript-eslint": "8.72.1"
   },
   "allowScripts": {
-    "github:famashines/ai-systems-kit#8b4a4a44320d94c234adae418c1d7e4a4e76277a": true,
-    "github:famashines/ai-systems-contracts#09f6c8c5385e90dd96cdc81fbd5c8c44d7e92257": true,
+    "github:famashines/ai-systems-kit#7d9c7b83ae2fdf012ba02611518252df309bad64": true,
+    "github:famashines/ai-systems-contracts#9ffcdd3175a8b7119682e0826fdf4438de085fd2": true,
     "protobufjs": false
   }
 }

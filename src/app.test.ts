@@ -76,8 +76,10 @@ let privateKey: CryptoKey;
 let jwks: Server;
 let jwksUrl: string;
 const orchestration = fake();
+const conversationHub = fake();
 const projections = fake();
 let orchestrationUrl: string;
+let conversationHubUrl: string;
 let projectionsUrl: string;
 const services: Service[] = [];
 
@@ -90,12 +92,13 @@ before(async () => {
   });
   jwksUrl = `${await listen(jwks)}/certs`;
   orchestrationUrl = await listen(orchestration.server);
+  conversationHubUrl = await listen(conversationHub.server);
   projectionsUrl = await listen(projections.server);
 });
 
 after(async () => {
   await Promise.all(services.map((service) => service.close()));
-  for (const server of [jwks, orchestration.server, projections.server]) {
+  for (const server of [jwks, orchestration.server, conversationHub.server, projections.server]) {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   }
@@ -103,6 +106,7 @@ after(async () => {
 
 beforeEach(() => {
   orchestration.seen.length = 0;
+  conversationHub.seen.length = 0;
   projections.seen.length = 0;
 });
 
@@ -132,6 +136,7 @@ const start = async (options: Partial<AppOptions> = {}) => {
       jwksUrl,
     }),
     orchestrationUrl,
+    conversationHubUrl,
     projectionsUrl,
     logger,
     drainDelayMs: 0,
@@ -191,6 +196,8 @@ describe("auth", () => {
       for (const [method, path] of [
         ["POST", "/api/tasks"],
         ["GET", "/api/tasks"],
+        ["POST", `/api/conversations/${randomUUID()}/messages`],
+        ["GET", `/api/conversations/${randomUUID()}/messages`],
         ["GET", "/api/unknown"],
         ["DELETE", "/nothing"],
       ] as const) {
@@ -200,7 +207,10 @@ describe("auth", () => {
         assert.equal((await problemOf(response)).code, "unauthorized");
       }
     }
-    assert.equal(orchestration.seen.length + projections.seen.length, 0);
+    assert.equal(
+      orchestration.seen.length + conversationHub.seen.length + projections.seen.length,
+      0,
+    );
   });
 
   test("health, ready and metrics stay open", async () => {
@@ -577,6 +587,236 @@ describe("GET /api/tasks", () => {
   });
 });
 
+const posting = () => {
+  const answers = new Map<string, unknown>();
+  conversationHub.set((seen, response) => {
+    const { commandId, payload } = seen.body as {
+      commandId: string;
+      payload: { conversationId: string; taskId?: string };
+    };
+    const known = answers.get(commandId);
+    const answer = known ?? {
+      conversationId: payload.conversationId,
+      messageId: randomUUID(),
+      ...(payload.taskId === undefined
+        ? { intent: "new_task" }
+        : { intent: "steer", taskId: payload.taskId }),
+    };
+    answers.set(commandId, answer);
+    json(response, known ? 200 : 201, answer);
+  });
+  return answers;
+};
+
+describe("POST /api/conversations/:id/messages", () => {
+  const conversationId = randomUUID();
+  const path = `/api/conversations/${conversationId}/messages`;
+
+  test("sends a PostOwnerMessage command and gives 202 with the intent", async () => {
+    posting();
+    const call = await start();
+    const key = randomUUID();
+    const correlationId = randomUUID();
+    const taskId = randomUUID();
+    const response = await call(
+      path,
+      await submit({ text: "Make it shorter", taskId, conversationId: randomUUID() }, key, {
+        "x-correlation-id": correlationId,
+      }),
+    );
+    assert.equal(response.status, 202);
+    const body = (await response.json()) as { messageId: string };
+    assert.deepEqual(body, { conversationId, messageId: body.messageId, intent: "steer", taskId });
+    assert.equal(conversationHub.seen.length, 1);
+    const sent = conversationHub.seen[0];
+    assert.ok(sent);
+    assert.equal(sent.method, "POST");
+    assert.equal(sent.url, "/internal/commands/post-owner-message");
+    assert.equal(sent.headers["x-correlation-id"], correlationId);
+    assert.equal(sent.headers.authorization, undefined);
+    assert.deepEqual(sent.body, {
+      commandId: key,
+      type: "conversation.PostOwnerMessage",
+      actor: { kind: "owner", id: "owner-1" },
+      payload: { conversationId, text: "Make it shorter", taskId, newTask: false },
+    });
+    assert.equal(orchestration.seen.length, 0);
+  });
+
+  test("the same key twice gives the same message", async () => {
+    const answers = posting();
+    const call = await start();
+    const key = randomUUID();
+    const first = await call(path, await submit({ text: "Hi", newTask: true }, key));
+    const second = await call(path, await submit({ text: "Hi", newTask: true }, key));
+    assert.equal(first.status, 202);
+    assert.equal(second.status, 202);
+    assert.deepEqual(await first.json(), await second.json());
+    assert.equal(answers.size, 1);
+    assert.equal(conversationHub.seen.length, 2);
+  });
+
+  test("a bad key, body or conversation id gives 400 with no upstream call", async () => {
+    posting();
+    const call = await start();
+    const noKey = await call(path, {
+      method: "POST",
+      headers: await authed({ "content-type": "application/json" }),
+      body: JSON.stringify({ text: "Hi" }),
+    });
+    assert.equal(noKey.status, 400);
+    const cases: [string, unknown, string][] = [
+      [path, {}, "body.text"],
+      [path, { text: " " }, "body.text"],
+      [path, { text: "a".repeat(20001) }, "body.text"],
+      [path, { text: "Hi", taskId: "x" }, "body.taskId"],
+      [path, { text: "Hi", taskId: randomUUID(), newTask: true }, "body.taskId"],
+      [path, { text: "Hi", newTask: "yes" }, "body.newTask"],
+      [path, [], "body"],
+      ["/api/conversations/not-a-uuid/messages", { text: "Hi" }, "params.id"],
+      [`/api/conversations/${randomUUID().toUpperCase()}/messages`, { text: "Hi" }, "params.id"],
+    ];
+    for (const [target, body, issuePath] of cases) {
+      const response = await call(target, await submit(body));
+      assert.equal(response.status, 400, JSON.stringify(body));
+      const problem = (await problemOf(response)) as unknown as {
+        code: string;
+        errors: { path: string }[];
+      };
+      assert.equal(problem.code, "validation_failed");
+      assert.ok(
+        problem.errors.some((issue) => issue.path === issuePath),
+        `${issuePath} ${JSON.stringify(problem.errors)}`,
+      );
+    }
+    assert.equal(conversationHub.seen.length, 0);
+  });
+
+  test("a 409 from conversation-hub passes through, other answers give 502 or 503", async () => {
+    const call = await start();
+    conversationHub.set((_seen, response) => {
+      json(
+        response,
+        409,
+        {
+          type: "about:blank",
+          title: "Conflict",
+          status: 409,
+          code: "conflict",
+          detail: "The task is not in this conversation",
+        },
+        "application/problem+json",
+      );
+    });
+    const clash = await call(path, await submit({ text: "Hi", taskId: randomUUID() }));
+    assert.equal(clash.status, 409);
+    const problem = await problemOf(clash);
+    assert.equal(problem.code, "conflict");
+    assert.equal(problem.instance, path);
+    const bad: Behaviour[] = [
+      (_seen, response) => {
+        json(response, 500, { type: "x", title: "x", status: 500, code: "internal" });
+      },
+      (_seen, response) => {
+        json(response, 201, {
+          conversationId: randomUUID(),
+          messageId: randomUUID(),
+          intent: "new_task",
+        });
+      },
+      (_seen, response) => {
+        json(response, 201, { conversationId, messageId: randomUUID(), intent: "later" });
+      },
+      (_seen, response) => response.writeHead(201).end("not json"),
+    ];
+    for (const answer of bad) {
+      conversationHub.set(answer);
+      const response = await call(path, await submit({ text: "Hi" }));
+      assert.equal(response.status, 502);
+      assert.equal((await problemOf(response)).code, "unavailable");
+    }
+    const closed = createServer();
+    const url = await listen(closed);
+    await new Promise((resolve) => closed.close(resolve));
+    const down = await start({ conversationHubUrl: url });
+    const response = await down(path, await submit({ text: "Hi" }));
+    assert.equal(response.status, 503);
+    assert.equal((await problemOf(response)).code, "unavailable");
+  });
+});
+
+describe("GET /api/conversations/:id/messages", () => {
+  const conversationId = randomUUID();
+  const thread = {
+    items: [
+      {
+        role: "agent",
+        messageId: randomUUID(),
+        text: "Here is the poem",
+        taskId: randomUUID(),
+        createdAt: "2026-10-31T08:01:00.000Z",
+        rev: 1,
+        asOf: 5,
+      },
+      {
+        role: "owner",
+        messageId: randomUUID(),
+        text: "Write a poem",
+        intent: "new_task",
+        createdAt: "2026-10-31T08:00:00.000Z",
+        rev: 1,
+        asOf: 2,
+      },
+    ],
+    headSeq: 7,
+  };
+
+  test("forwards the page query to projections and gives the thread", async () => {
+    projections.set((_seen, response) => {
+      json(response, 200, thread);
+    });
+    const call = await start();
+    const before = "2026-10-31T08:00:00.000Z";
+    const beforeId = randomUUID();
+    const response = await call(
+      `/api/conversations/${conversationId}/messages?limit=20&before=${before}&beforeId=${beforeId}&x=1`,
+      { headers: await authed() },
+    );
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), thread);
+    assert.equal(
+      projections.seen[0]?.url,
+      `/internal/conversations/${conversationId}/messages?limit=20&before=${encodeURIComponent(before)}&beforeId=${beforeId}`,
+    );
+    await call(`/api/conversations/${conversationId}/messages`, { headers: await authed() });
+    assert.equal(projections.seen[1]?.url, `/internal/conversations/${conversationId}/messages`);
+  });
+
+  test("a bad id or query gives 400 with no upstream call", async () => {
+    const call = await start();
+    for (const target of [
+      "/api/conversations/x/messages",
+      `/api/conversations/${conversationId}/messages?limit=0`,
+      `/api/conversations/${conversationId}/messages?before=yesterday`,
+    ]) {
+      const response = await call(target, { headers: await authed() });
+      assert.equal(response.status, 400, target);
+    }
+    assert.equal(projections.seen.length, 0);
+  });
+
+  test("a bad answer from projections gives 502", async () => {
+    const call = await start();
+    projections.set((_seen, response) => {
+      json(response, 200, { items: [{ role: "agent", text: "x" }], headSeq: 1 });
+    });
+    const response = await call(`/api/conversations/${conversationId}/messages`, {
+      headers: await authed(),
+    });
+    assert.equal(response.status, 502);
+  });
+});
+
 describe("upstream body limit", () => {
   test("an answer over 1 MiB gives 502, with or without content-length", async () => {
     const call = await start();
@@ -649,6 +889,7 @@ describe("env", () => {
     assert.equal(config.OIDC_ISSUER, "https://auth.famashines.com/realms/ai-systems");
     assert.equal(config.OIDC_AUDIENCE, "ai-systems-app");
     assert.equal(config.REQUIRED_ROLE, "owner");
+    assert.equal(config.CONVERSATION_HUB_URL, "http://ai-systems-conversation-hub:8080");
     assert.equal(config.PORT, 8080);
     assert.throws(() =>
       loadConfig(Env, { ORCHESTRATION_URL: "file:///etc/passwd", PROJECTIONS_URL: "x" }),
