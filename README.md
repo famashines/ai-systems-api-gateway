@@ -24,6 +24,8 @@ app --HTTPS /api--> Traefik --> api-gateway
 | `GET /api/tasks?limit=&before=`             | the task list (below)                       |
 | `POST /api/conversations/:id/messages`      | post an owner message to a thread (below)   |
 | `GET /api/conversations/:id/messages`       | the messages of a thread (below)            |
+| `GET /api/budget?month=`                    | the budget of a month (below)               |
+| `GET /api/agents`                           | the agent list (below)                      |
 
 All other paths need a valid token too: with no valid token, an unknown
 path gives 401, not 404 (the hooks run before routing).
@@ -137,10 +139,29 @@ a task of the thread. The same key again gives the same message.
 - Forwards to `GET <PROJECTIONS_URL>/internal/conversations/<id>/messages`
   and gives `ConversationThreadResultV1` (newest first). The answer is
   checked with zod; a bad answer is 502.
-- projections does not have this path yet: the chat read model is task
-  M2-07. Until then the route gives 502 (projections answers 404). A thread
-  with no messages must be a 200 with empty `items` from projections,
-  because the gateway does not pass a 404 through.
+- projections gives 200 with empty `items` for an unknown thread. A page
+  has at most 900 KiB of JSON, so it can have fewer items than `limit`.
+  Only an empty page is the end. Use the last item as the cursor.
+
+### `GET /api/budget`
+
+- Query, optional: `month` (contracts `BudgetMonth`, `YYYY-MM`), else 400. With no `month`, projections gives the current month in the owner
+  time zone. Other query keys are dropped.
+- Forwards to `GET <PROJECTIONS_URL>/internal/budget` and gives
+  `BudgetMonthV1`. The answer is checked with zod; a bad answer is 502.
+- 404 `not_found` from projections (no cap is set and the month has no
+  spend) passes through. The app shows "no cap set" for it. Only this
+  route passes a 404.
+
+### `GET /api/agents`
+
+- No query. Forwards to `GET <PROJECTIONS_URL>/internal/agents` and gives
+  `AgentListResultV1`. A 404 or a bad answer is 502.
+
+No command route for budget or agents yet. `SetBudget` needs a route that
+forwards the owner `Authorization` header, because budget checks the
+token itself; `call()` sends only `accept`, `content-type` and
+`x-correlation-id` today.
 
 ### Rate limit
 
