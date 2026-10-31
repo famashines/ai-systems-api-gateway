@@ -3,17 +3,22 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, describe, test } from "node:test";
-import { createJwtVerifier } from "@famashines/ai-systems-kit/auth";
+import { bearerHook, createJwtVerifier, subjectOf } from "@famashines/ai-systems-kit/auth";
 import { loadConfig } from "@famashines/ai-systems-kit/config";
 import {
   ConflictError,
   createService,
+  ForbiddenError,
   validate,
   ValidationError,
   type Service,
 } from "@famashines/ai-systems-kit/http";
 import { createLogger } from "@famashines/ai-systems-kit/observability";
-import { CommandEnvelopeV1, SubmitTaskCommandPayloadV1 } from "@famashines/ai-systems-contracts";
+import {
+  CommandEnvelopeV1,
+  SetBudgetCommandPayloadV1,
+  SubmitTaskCommandPayloadV1,
+} from "@famashines/ai-systems-contracts";
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { z } from "zod";
 import { createApp, type AppOptions } from "./app.ts";
@@ -78,9 +83,11 @@ let jwksUrl: string;
 const orchestration = fake();
 const conversationHub = fake();
 const projections = fake();
+const budget = fake();
 let orchestrationUrl: string;
 let conversationHubUrl: string;
 let projectionsUrl: string;
+let budgetUrl: string;
 const services: Service[] = [];
 
 before(async () => {
@@ -94,11 +101,18 @@ before(async () => {
   orchestrationUrl = await listen(orchestration.server);
   conversationHubUrl = await listen(conversationHub.server);
   projectionsUrl = await listen(projections.server);
+  budgetUrl = await listen(budget.server);
 });
 
 after(async () => {
   await Promise.all(services.map((service) => service.close()));
-  for (const server of [jwks, orchestration.server, conversationHub.server, projections.server]) {
+  for (const server of [
+    jwks,
+    orchestration.server,
+    conversationHub.server,
+    projections.server,
+    budget.server,
+  ]) {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
   }
@@ -108,6 +122,7 @@ beforeEach(() => {
   orchestration.seen.length = 0;
   conversationHub.seen.length = 0;
   projections.seen.length = 0;
+  budget.seen.length = 0;
 });
 
 const now = (): number => Math.floor(Date.now() / 1000);
@@ -138,6 +153,7 @@ const start = async (options: Partial<AppOptions> = {}) => {
     orchestrationUrl,
     conversationHubUrl,
     projectionsUrl,
+    budgetUrl,
     logger,
     drainDelayMs: 0,
     ...options,
@@ -886,6 +902,199 @@ describe("GET /api/budget", () => {
   });
 });
 
+describe("POST /api/budget", () => {
+  const cap = { scope: { kind: "month" }, hardCapMicroUsd: 5_000_000, softCapMicroUsd: 4_000_000 };
+  const SetBudgetBody = CommandEnvelopeV1(SetBudgetCommandPayloadV1).extend({
+    type: z.literal("budget.SetBudget"),
+  });
+
+  test("forwards SetBudget with the owner token to a budget service that checks it", async () => {
+    const versions = new Map<string, number>();
+    const tokens: (string | undefined)[] = [];
+    const upstream = createService({
+      logger,
+      drainDelayMs: 0,
+      before: [
+        (request) => {
+          tokens.push(request.headers.authorization);
+        },
+        bearerHook(
+          createJwtVerifier({ issuer, audience: "ai-systems-app", requiredRole: "owner", jwksUrl }),
+        ),
+      ],
+      routes: [
+        {
+          method: "POST",
+          path: "/internal/commands/set-budget",
+          handler: async (request) => {
+            const { body } = await validate(request, { body: SetBudgetBody });
+            if (body.actor.id !== subjectOf(request).sub) throw new ForbiddenError();
+            if (body.payload.scope.kind !== "month") {
+              throw new ValidationError("The request is not valid", [
+                { path: "payload.scope.kind", code: "invalid_value", message: "month only" },
+              ]);
+            }
+            const known = versions.get(body.commandId);
+            const version = known ?? versions.size + 1;
+            versions.set(body.commandId, version);
+            return { status: known ? 200 : 201, body: { version } };
+          },
+        },
+      ],
+    });
+    services.push(upstream);
+    const { port } = await upstream.listen(0, "127.0.0.1");
+    const call = await start({ budgetUrl: `http://127.0.0.1:${String(port)}` });
+    const key = randomUUID();
+    const request = await submit(cap, key);
+    const first = await call("/api/budget", request);
+    const again = await call("/api/budget", request);
+    assert.equal(first.status, 202);
+    assert.equal(again.status, 202);
+    assert.deepEqual(await first.json(), { version: 1 });
+    assert.deepEqual(await again.json(), { version: 1 });
+    const sent = request.headers.authorization;
+    assert.deepEqual(tokens, [sent, sent]);
+
+    const project = await call(
+      "/api/budget",
+      await submit({ scope: { kind: "project", key: randomUUID() }, hardCapMicroUsd: 1 }),
+    );
+    assert.equal(project.status, 400);
+    const problem = (await problemOf(project)) as unknown as {
+      instance: string;
+      errors: { path: string }[];
+    };
+    assert.equal(problem.instance, "/api/budget");
+    assert.deepEqual(
+      problem.errors.map((issue) => issue.path),
+      ["payload.scope.kind"],
+    );
+  });
+
+  test("sends the command body and only this route forwards the token", async () => {
+    budget.set((_seen, response) => {
+      json(response, 201, { version: 3 });
+    });
+    const call = await start();
+    const key = randomUUID();
+    const correlationId = randomUUID();
+    const request = await submit(cap, key, { "x-correlation-id": correlationId });
+    const response = await call("/api/budget", request);
+    assert.equal(response.status, 202);
+    assert.deepEqual(await response.json(), { version: 3 });
+    const sent = budget.seen[0];
+    assert.ok(sent);
+    assert.equal(sent.url, "/internal/commands/set-budget");
+    assert.equal(sent.headers.authorization, request.headers.authorization);
+    assert.equal(sent.headers["x-correlation-id"], correlationId);
+    assert.deepEqual(sent.body, {
+      commandId: key,
+      type: "budget.SetBudget",
+      actor: { kind: "owner", id: "owner-1" },
+      payload: cap,
+    });
+    replaying();
+    await call("/api/tasks", await submit({ text: "Write a poem" }));
+    assert.equal(orchestration.seen[0]?.headers.authorization, undefined);
+  });
+
+  test("a bad key or body gives 400 with no upstream call", async () => {
+    const call = await start();
+    const noKey = await call("/api/budget", {
+      method: "POST",
+      headers: await authed({ "content-type": "application/json" }),
+      body: JSON.stringify(cap),
+    });
+    assert.equal(noKey.status, 400);
+    const cases: [unknown, string][] = [
+      [{}, "body.scope"],
+      [{ ...cap, hardCapMicroUsd: 1.5 }, "body.hardCapMicroUsd"],
+      [{ ...cap, hardCapMicroUsd: -1 }, "body.hardCapMicroUsd"],
+      [{ ...cap, hardCapMicroUsd: 1_000_000_000_001 }, "body.hardCapMicroUsd"],
+      [{ ...cap, softCapMicroUsd: 6_000_000 }, "body.softCapMicroUsd"],
+      [{ ...cap, scope: { kind: "month", key: "2026-10" } }, "body.scope.key"],
+      [{ ...cap, scope: { kind: "year" } }, "body.scope.kind"],
+    ];
+    for (const [body, issuePath] of cases) {
+      const response = await call("/api/budget", await submit(body));
+      assert.equal(response.status, 400, JSON.stringify(body));
+      const problem = (await problemOf(response)) as unknown as { errors: { path: string }[] };
+      assert.ok(
+        problem.errors.some((issue) => issue.path === issuePath),
+        `${issuePath} ${JSON.stringify(problem.errors)}`,
+      );
+    }
+    assert.equal(budget.seen.length, 0);
+  });
+
+  test("400, 403 and 409 from budget pass through; other answers give 502 or 503", async () => {
+    const call = await start();
+    for (const [status, code] of [
+      [400, "validation_failed"],
+      [403, "forbidden"],
+      [409, "conflict"],
+    ] as const) {
+      budget.set((_seen, response) => {
+        json(
+          response,
+          status,
+          { type: "about:blank", title: "No", status, code },
+          "application/problem+json",
+        );
+      });
+      const response = await call("/api/budget", await submit(cap));
+      assert.equal(response.status, status);
+      const problem = await problemOf(response);
+      assert.equal(problem.code, code);
+      assert.equal(problem.instance, "/api/budget");
+    }
+    const bad: Behaviour[] = [
+      (_seen, response) => {
+        json(response, 401, {
+          type: "about:blank",
+          title: "No",
+          status: 401,
+          code: "unauthorized",
+        });
+      },
+      (_seen, response) => {
+        json(response, 503, { type: "about:blank", title: "No", status: 503, code: "unavailable" });
+      },
+      (_seen, response) => {
+        json(response, 201, { version: 0 });
+      },
+      (_seen, response) => response.writeHead(201).end("not json"),
+    ];
+    for (const answer of bad) {
+      budget.set(answer);
+      const response = await call("/api/budget", await submit(cap));
+      assert.equal(response.status, 502);
+      assert.equal((await problemOf(response)).code, "unavailable");
+    }
+    const closed = createServer();
+    const url = await listen(closed);
+    await new Promise((resolve) => closed.close(resolve));
+    const down = await start({ budgetUrl: url });
+    const response = await down("/api/budget", await submit(cap));
+    assert.equal(response.status, 503);
+  });
+
+  test("the route needs the owner role", async () => {
+    const call = await start();
+    const response = await call("/api/budget", {
+      ...(await submit(cap)),
+      headers: {
+        authorization: `Bearer ${await sign({ realm_access: { roles: [] } })}`,
+        "content-type": "application/json",
+        "idempotency-key": randomUUID(),
+      },
+    });
+    assert.equal(response.status, 403);
+    assert.equal(budget.seen.length, 0);
+  });
+});
+
 describe("GET /api/agents", () => {
   const agents = {
     items: [
@@ -1010,6 +1219,7 @@ describe("env", () => {
     assert.equal(config.OIDC_AUDIENCE, "ai-systems-app");
     assert.equal(config.REQUIRED_ROLE, "owner");
     assert.equal(config.CONVERSATION_HUB_URL, "http://ai-systems-conversation-hub:8080");
+    assert.equal(config.BUDGET_URL, "http://ai-systems-budget:8080");
     assert.equal(config.PORT, 8080);
     assert.throws(() =>
       loadConfig(Env, { ORCHESTRATION_URL: "file:///etc/passwd", PROJECTIONS_URL: "x" }),

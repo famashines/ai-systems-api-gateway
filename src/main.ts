@@ -17,6 +17,7 @@ const app = createApp({
   orchestrationUrl: config.ORCHESTRATION_URL,
   conversationHubUrl: config.CONVERSATION_HUB_URL,
   projectionsUrl: config.PROJECTIONS_URL,
+  budgetUrl: config.BUDGET_URL,
   logger,
   metrics: telemetry.metricsHandler,
   closeHooks: [telemetry.shutdown],

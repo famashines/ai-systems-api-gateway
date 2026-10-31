@@ -8,6 +8,7 @@ import {
   MessageIntent,
   PostOwnerMessageCommandPayloadV1,
   ProblemJson,
+  SetBudgetCommandPayloadV1,
   SubmitTaskCommandPayloadV1,
   TaskListResultV1,
   Timestamp,
@@ -33,6 +34,7 @@ export interface AppOptions {
   orchestrationUrl: string;
   conversationHubUrl: string;
   projectionsUrl: string;
+  budgetUrl: string;
   logger: ServiceOptions["logger"];
   metrics?: ServiceOptions["metrics"];
   closeHooks?: ServiceOptions["closeHooks"];
@@ -42,6 +44,8 @@ export interface AppOptions {
 }
 
 const Accepted = z.object({ taskId: Id, version: z.int().min(1) });
+
+const BudgetVersion = z.object({ version: z.int().min(1) });
 
 const Posted = z.object({
   conversationId: Id,
@@ -68,6 +72,8 @@ const NoQuery = z.object({});
 const passedStatuses = new Set([400, 409, 413, 415, 422]);
 
 const passedWithNotFound = new Set([...passedStatuses, 404]);
+
+const passedWithForbidden = new Set([...passedStatuses, 403]);
 
 const PassedProblem = ProblemJson.pick({
   type: true,
@@ -119,7 +125,13 @@ const parseJson = (text: string): unknown => {
 export function createApp(options: AppOptions): Service {
   const { verify, logger, upstreamTimeoutMs = 5000 } = options;
 
-  async function call(name: string, url: URL, request: Request, body?: unknown): Promise<Upstream> {
+  async function call(
+    name: string,
+    url: URL,
+    request: Request,
+    body?: unknown,
+    extra: Record<string, string> = {},
+  ): Promise<Upstream> {
     let status: number;
     let text: string | undefined;
     try {
@@ -129,6 +141,7 @@ export function createApp(options: AppOptions): Service {
           accept: "application/json",
           "x-correlation-id": request.correlationId,
           ...(body === undefined ? {} : { "content-type": "application/json" }),
+          ...extra,
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         redirect: "error",
@@ -279,6 +292,33 @@ export function createApp(options: AppOptions): Service {
       path: "/api/budget",
       handler: (request) =>
         list(request, "/internal/budget", BudgetMonthV1, MonthQuery, passedWithNotFound),
+    },
+    {
+      method: "POST",
+      path: "/api/budget",
+      handler: async (request) => {
+        const commandId = idempotencyKey(request);
+        const { body } = await validate(request, { body: SetBudgetCommandPayloadV1 });
+        const command = CommandEnvelopeV1(SetBudgetCommandPayloadV1).parse({
+          commandId,
+          type: "budget.SetBudget",
+          actor: { kind: "owner", id: subjectOf(request).sub },
+          payload: body,
+        });
+        const upstream = await call(
+          "budget",
+          new URL("/internal/commands/set-budget", options.budgetUrl),
+          request,
+          command,
+          { authorization: request.headers.authorization ?? "" },
+        );
+        if (upstream.status !== 200 && upstream.status !== 201) {
+          return problem(upstream, request, passedWithForbidden);
+        }
+        const set = BudgetVersion.safeParse(upstream.body);
+        if (!set.success) throw badGateway();
+        return { status: 202, body: set.data };
+      },
     },
     {
       method: "GET",

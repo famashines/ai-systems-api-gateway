@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `POST /api/budget`: `Idempotency-Key` check, `SetBudget` command to
+  budget (`/internal/commands/set-budget`) with the `Authorization` header
+  of the owner (only on this route), 202 with `{ version }`. 400, 403 and
+  409 from budget pass through.
+- New env `BUDGET_URL`, default `http://ai-systems-budget:8080`.
+
 - `GET /api/budget?month=`: the month view (`BudgetMonthV1`) from
   projections; a 404 from projections passes through.
 - `GET /api/agents`: the agent list (`AgentListResultV1`) from projections.

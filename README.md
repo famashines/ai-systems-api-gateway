@@ -11,6 +11,7 @@ app --HTTPS /api--> Traefik --> api-gateway
                                   | zod checks: 400
                                   +--POST--> orchestration    /internal/commands/submit-task
                                   +--POST--> conversation-hub /internal/commands/post-owner-message
+                                  +--POST--> budget           /internal/commands/set-budget (with Authorization)
                                   +--GET---> projections      /internal/tasks
                                   +--GET---> projections      /internal/conversations/<id>/messages
 ```
@@ -25,6 +26,7 @@ app --HTTPS /api--> Traefik --> api-gateway
 | `POST /api/conversations/:id/messages`      | post an owner message to a thread (below)   |
 | `GET /api/conversations/:id/messages`       | the messages of a thread (below)            |
 | `GET /api/budget?month=`                    | the budget of a month (below)               |
+| `POST /api/budget`                          | set the monthly cap (below)                 |
 | `GET /api/agents`                           | the agent list (below)                      |
 
 All other paths need a valid token too: with no valid token, an unknown
@@ -158,10 +160,47 @@ a task of the thread. The same key again gives the same message.
 - No query. Forwards to `GET <PROJECTIONS_URL>/internal/agents` and gives
   `AgentListResultV1`. A 404 or a bad answer is 502.
 
-No command route for budget or agents yet. `SetBudget` needs a route that
-forwards the owner `Authorization` header, because budget checks the
-token itself; `call()` sends only `accept`, `content-type` and
-`x-correlation-id` today.
+### `POST /api/budget`
+
+Sets the monthly hard cap and an optional soft cap. The same path as the
+month view, because it changes that view.
+
+Request:
+
+- Header `Idempotency-Key`: the same rule as `POST /api/tasks`.
+- Body: `SetBudgetCommandPayloadV1` (contracts v0.3.0):
+  `{ scope: { kind: "month" }, hardCapMicroUsd, softCapMicroUsd? }`,
+  integer micro-USD, at most 1,000,000,000,000, the soft cap not above the
+  hard cap. Else 400 with no upstream call.
+
+The gateway sends this `CommandEnvelopeV1` to
+`POST <BUDGET_URL>/internal/commands/set-budget`:
+
+```json
+{
+  "commandId": "<Idempotency-Key>",
+  "type": "budget.SetBudget",
+  "actor": { "kind": "owner", "id": "<sub of the token>" },
+  "payload": { "scope": { "kind": "month" }, "hardCapMicroUsd": 5000000 }
+}
+```
+
+Budget checks the owner token itself and refuses an `actor.id` that is not
+the token `sub`. So this route, and only this route, also sends the
+`Authorization` header of the request to the upstream. All other routes
+send only `accept`, `content-type` and `x-correlation-id`.
+
+| Budget answer                                    | Gateway answer                                |
+| ------------------------------------------------ | --------------------------------------------- |
+| 201 or 200 (replay) with `{ version }`           | 202, same body                                |
+| problem JSON with 400, 403, 409, 413, 415 or 422 | same status and problem (allowed fields only) |
+| 401 (the gateway already accepted the token)     | 502 `unavailable`                             |
+| other answers, size, timeout and network errors  | as for `POST /api/tasks`                      |
+
+Budget gives 400 for a scope other than `month` (M2), 403 when the token
+has no `owner` role or `actor.id` is not its `sub`, and 409 `conflict` for
+a concurrent change of the cap. The new cap reaches the month view
+through projections, so the app sees it with the next `budget` notice.
 
 ### Rate limit
 
@@ -185,6 +224,7 @@ Read once at start with zod (kit/config); a bad value stops the process.
 | `ORCHESTRATION_URL`                                                 | required, `http` or `https` origin                  |
 | `CONVERSATION_HUB_URL`                                              | `http://ai-systems-conversation-hub:8080`           |
 | `PROJECTIONS_URL`                                                   | required, `http` or `https` origin                  |
+| `BUDGET_URL`                                                        | `http://ai-systems-budget:8080`                     |
 | `OIDC_ISSUER`                                                       | `https://auth.famashines.com/realms/ai-systems`     |
 | `OIDC_JWKS_URL`                                                     | none: `<OIDC_ISSUER>/protocol/openid-connect/certs` |
 | `OIDC_AUDIENCE`                                                     | `ai-systems-app`                                    |
@@ -240,6 +280,9 @@ repo. A manual run (`workflow_dispatch`) works only on `main`.
   its size is the number of owner users (one).
 - The rate limit is for each pod. With two pods the real limit is double.
   Traefik has the limit for the whole Ingress (ARCHITECTURE 11.1).
+- On the cluster, `POST /api/budget` needs a NetworkPolicy that lets
+  api-gateway connect to budget on port 8080 (egress of api-gateway,
+  ingress of budget). The policy is in `platform/gitops`.
 - Requests with a bad token are not rate limited here (there is no
   subject). Traefik limits them. A bad token costs one RS256 check, and an
   unknown `kid` causes at most one JWKS fetch each 30 s (each 5 s while
