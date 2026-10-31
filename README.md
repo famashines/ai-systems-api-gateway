@@ -145,6 +145,14 @@ are in the image. The runtime stage has no npm and no npx. `node` is the
 `ENTRYPOINT` and PID 1: a SIGTERM or SIGINT before the server listens
 exits with 143 at once; after that, the kit shutdown handles it.
 
+Release: a push to `main` runs `.github/workflows/release.yml`. It builds
+the image, makes a CycloneDX SBOM (a workflow artifact), and scans the
+image with grype. A HIGH or CRITICAL finding with a fix stops the
+release. Then it pushes `ghcr.io/famashines/ai-systems-api-gateway:sha-<commit>` and
+opens a pull request in `famashines/gitops` that sets the tag and the
+digest in `kubernetes/ai-systems/ai-systems-api-gateway/prod`. The owner merges it. The
+job needs the Actions secret `GITOPS_TOKEN`.
+
 ## Known limits
 
 - The rate limit map has one entry for each `sub` with the owner role, so
