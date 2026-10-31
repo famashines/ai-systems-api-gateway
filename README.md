@@ -145,13 +145,16 @@ are in the image. The runtime stage has no npm and no npx. `node` is the
 `ENTRYPOINT` and PID 1: a SIGTERM or SIGINT before the server listens
 exits with 143 at once; after that, the kit shutdown handles it.
 
-Release: a push to `main` runs `.github/workflows/release.yml`. It builds
-the image, makes a CycloneDX SBOM (a workflow artifact), and scans the
-image with grype. A HIGH or CRITICAL finding with a fix stops the
-release. Then it pushes `ghcr.io/famashines/ai-systems-api-gateway:sha-<commit>` and
-opens a pull request in `famashines/gitops` that sets the tag and the
-digest in `kubernetes/ai-systems/ai-systems-api-gateway/prod`. The owner merges it. The
-job needs the Actions secret `GITOPS_TOKEN`.
+Release: when `ci` passes on a push to `main`, `.github/workflows/release.yml`
+builds the image of that commit, makes a CycloneDX SBOM (a workflow
+artifact), and scans the image with grype. A HIGH or CRITICAL finding that
+has a fix stops the release. Findings with no fix do not stop it; they are
+in the job log. Then it pushes `ghcr.io/famashines/ai-systems-api-gateway:sha-<commit>`
+and opens or updates the pull request from the branch
+`release/ai-systems-api-gateway-prod` in `famashines/gitops`. That pull request sets the
+tag and the digest in `kubernetes/ai-systems/ai-systems-api-gateway/prod`. The owner
+merges it. The job needs the org secret `GITOPS_TOKEN` with access to this
+repo. A manual run (`workflow_dispatch`) works only on `main`.
 
 ## Known limits
 
