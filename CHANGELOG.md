@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `GET /api/budget?month=`: the month view (`BudgetMonthV1`) from
+  projections; a 404 from projections passes through.
+- `GET /api/agents`: the agent list (`AgentListResultV1`) from projections.
+
 - `POST /api/conversations/:id/messages`: `Idempotency-Key` check,
   `PostOwnerMessage` command to conversation-hub, 202 with
   `{ conversationId, messageId, intent, taskId? }`.

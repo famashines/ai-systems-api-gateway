@@ -198,6 +198,8 @@ describe("auth", () => {
         ["GET", "/api/tasks"],
         ["POST", `/api/conversations/${randomUUID()}/messages`],
         ["GET", `/api/conversations/${randomUUID()}/messages`],
+        ["GET", "/api/budget"],
+        ["GET", "/api/agents"],
         ["GET", "/api/unknown"],
         ["DELETE", "/nothing"],
       ] as const) {
@@ -225,9 +227,12 @@ describe("auth", () => {
   test("a token with no owner role gives 403", async () => {
     const call = await start();
     const token = await sign({ realm_access: { roles: ["default-roles-ai-systems"] } });
-    const response = await call("/api/tasks", { headers: { authorization: `Bearer ${token}` } });
-    assert.equal(response.status, 403);
-    assert.equal((await problemOf(response)).code, "forbidden");
+    for (const path of ["/api/tasks", "/api/budget", "/api/agents"]) {
+      const response = await call(path, { headers: { authorization: `Bearer ${token}` } });
+      assert.equal(response.status, 403, path);
+      assert.equal((await problemOf(response)).code, "forbidden");
+    }
+    assert.equal(projections.seen.length, 0);
   });
 
   test("a valid token on an unknown path gives 404", async () => {
@@ -814,6 +819,121 @@ describe("GET /api/conversations/:id/messages", () => {
       headers: await authed(),
     });
     assert.equal(response.status, 502);
+  });
+});
+
+describe("GET /api/budget", () => {
+  const month = {
+    month: "2026-10",
+    capMicroUsd: 1000,
+    spentMicroUsd: 1200,
+    reservedMicroUsd: 0,
+    remainingMicroUsd: 0,
+    overCapMicroUsd: 200,
+    rev: 3,
+    asOf: 2,
+  };
+
+  test("forwards the month to projections and gives the month view", async () => {
+    projections.set((_seen, response) => {
+      json(response, 200, month);
+    });
+    const call = await start();
+    const response = await call("/api/budget?month=2026-10&x=1", { headers: await authed() });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), month);
+    assert.equal(projections.seen[0]?.url, "/internal/budget?month=2026-10");
+    await call("/api/budget", { headers: await authed() });
+    const second = projections.seen[1];
+    assert.equal(second?.url, "/internal/budget");
+    assert.equal(second.headers.authorization, undefined);
+  });
+
+  test("a bad month gives 400 with no upstream call", async () => {
+    const call = await start();
+    for (const query of ["month=2026-13", "month=2026-1", "month=x"]) {
+      assert.equal((await call(`/api/budget?${query}`, { headers: await authed() })).status, 400);
+    }
+    assert.equal(projections.seen.length, 0);
+  });
+
+  test("404 from projections passes through; a bad answer gives 502", async () => {
+    const call = await start();
+    projections.set((seen, response) => {
+      json(
+        response,
+        404,
+        {
+          type: "about:blank",
+          title: "Not Found",
+          status: 404,
+          code: "not_found",
+          detail: "No cap is set and the month has no spend",
+          instance: seen.url,
+        },
+        "application/problem+json",
+      );
+    });
+    const missing = await call("/api/budget", { headers: await authed() });
+    assert.equal(missing.status, 404);
+    const body = await problemOf(missing);
+    assert.equal(body.code, "not_found");
+    assert.equal(body.instance, "/api/budget");
+    projections.set((_seen, response) => {
+      json(response, 200, { ...month, capMicroUsd: -1 });
+    });
+    assert.equal((await call("/api/budget", { headers: await authed() })).status, 502);
+  });
+});
+
+describe("GET /api/agents", () => {
+  const agents = {
+    items: [
+      {
+        agentId: "00000000-0000-4000-8000-00000000a001",
+        name: "orchestrator",
+        enabled: true,
+        activeVersion: 1,
+        latestVersion: 1,
+        rev: 4,
+        asOf: 4,
+      },
+    ],
+    headSeq: 9,
+  };
+
+  test("gives the agent list from projections", async () => {
+    projections.set((_seen, response) => {
+      json(response, 200, agents);
+    });
+    const call = await start();
+    const response = await call("/api/agents?limit=5", { headers: await authed() });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), agents);
+    assert.equal(projections.seen[0]?.url, "/internal/agents");
+  });
+
+  test("a 404 or a bad answer from projections gives 502", async () => {
+    const call = await start();
+    projections.set((seen, response) => {
+      json(
+        response,
+        404,
+        {
+          type: "about:blank",
+          title: "Not Found",
+          status: 404,
+          code: "not_found",
+          instance: seen.url,
+        },
+        "application/problem+json",
+      );
+    });
+    assert.equal((await call("/api/agents", { headers: await authed() })).status, 502);
+    projections.set((_seen, response) => {
+      json(response, 200, { items: [{ name: "x" }], headSeq: 1 });
+    });
+    assert.equal((await call("/api/agents", { headers: await authed() })).status, 502);
   });
 });
 

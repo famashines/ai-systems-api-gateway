@@ -1,4 +1,7 @@
 import {
+  AgentListResultV1,
+  BudgetMonth,
+  BudgetMonthV1,
   CommandEnvelopeV1,
   ConversationThreadResultV1,
   Id,
@@ -58,7 +61,13 @@ const ListQuery = z.object({
   beforeId: Id.optional(),
 });
 
+const MonthQuery = z.object({ month: BudgetMonth.optional() });
+
+const NoQuery = z.object({});
+
 const passedStatuses = new Set([400, 409, 413, 415, 422]);
+
+const passedWithNotFound = new Set([...passedStatuses, 404]);
 
 const PassedProblem = ProblemJson.pick({
   type: true,
@@ -138,13 +147,9 @@ export function createApp(options: AppOptions): Service {
     return { status, body: parseJson(text) };
   }
 
-  function problem(upstream: Upstream, request: Request): Reply {
+  function problem(upstream: Upstream, request: Request, passed = passedStatuses): Reply {
     const parsed = PassedProblem.safeParse(upstream.body);
-    if (
-      !passedStatuses.has(upstream.status) ||
-      !parsed.success ||
-      parsed.data.status !== upstream.status
-    ) {
+    if (!passed.has(upstream.status) || !parsed.success || parsed.data.status !== upstream.status) {
       logger.warn(
         { status: upstream.status, path: request.path },
         "the upstream answer is refused",
@@ -172,14 +177,20 @@ export function createApp(options: AppOptions): Service {
     return key.data;
   }
 
-  async function list<T>(request: Request, path: string, schema: z.ZodType<T>): Promise<Reply> {
-    const { query } = await validate(request, { query: ListQuery });
+  async function list<T>(
+    request: Request,
+    path: string,
+    schema: z.ZodType<T>,
+    querySchema: z.ZodType<Record<string, string | undefined>> = ListQuery,
+    passed = passedStatuses,
+  ): Promise<Reply> {
+    const { query } = await validate(request, { query: querySchema });
     const url = new URL(path, options.projectionsUrl);
     for (const [name, value] of Object.entries(query)) {
       if (value !== undefined) url.searchParams.set(name, value);
     }
     const upstream = await call("projections", url, request);
-    if (upstream.status !== 200) return problem(upstream, request);
+    if (upstream.status !== 200) return problem(upstream, request, passed);
     const result = schema.safeParse(upstream.body);
     if (!result.success) throw badGateway();
     return { body: result.data };
@@ -262,6 +273,17 @@ export function createApp(options: AppOptions): Service {
           ConversationThreadResultV1,
         );
       },
+    },
+    {
+      method: "GET",
+      path: "/api/budget",
+      handler: (request) =>
+        list(request, "/internal/budget", BudgetMonthV1, MonthQuery, passedWithNotFound),
+    },
+    {
+      method: "GET",
+      path: "/api/agents",
+      handler: (request) => list(request, "/internal/agents", AgentListResultV1, NoQuery),
     },
   ];
 
