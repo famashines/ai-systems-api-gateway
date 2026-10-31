@@ -17,7 +17,7 @@ import { CommandEnvelopeV1, SubmitTaskCommandPayloadV1 } from "@famashines/ai-sy
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { z } from "zod";
 import { createApp, type AppOptions } from "./app.ts";
-import { Env } from "./env.ts";
+import { Env, verifierOptions } from "./env.ts";
 
 const issuer = "https://auth.example.test/realms/ai-systems";
 const logger = createLogger({ service: "test", release: "test", level: "silent" });
@@ -654,5 +654,23 @@ describe("env", () => {
       loadConfig(Env, { ORCHESTRATION_URL: "file:///etc/passwd", PROJECTIONS_URL: "x" }),
     );
     assert.throws(() => loadConfig(Env, {}));
+  });
+
+  test("OIDC_JWKS_URL is the key source, the issuer check stays", async () => {
+    const upstreams = {
+      ORCHESTRATION_URL: "http://ai-systems-orchestration:8080",
+      PROJECTIONS_URL: "http://ai-systems-projections:8080",
+    };
+    assert.equal(verifierOptions(loadConfig(Env, upstreams)).jwksUrl, undefined);
+    const config = loadConfig(Env, { ...upstreams, OIDC_ISSUER: issuer, OIDC_JWKS_URL: jwksUrl });
+    const options = verifierOptions(config);
+    assert.equal(options.issuer, issuer);
+    assert.equal(options.jwksUrl, jwksUrl);
+    const verify = createJwtVerifier(options);
+    assert.equal((await verify(await sign())).sub, "owner-1");
+    await assert.rejects(
+      verify(await sign({ iss: "https://other.example.test/realms/ai-systems" })),
+    );
+    assert.throws(() => loadConfig(Env, { ...upstreams, OIDC_JWKS_URL: "file:///etc/passwd" }));
   });
 });

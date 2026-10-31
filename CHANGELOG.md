@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- Optional `OIDC_JWKS_URL`: the verifier reads the keys from it; the `iss`
+  check stays `OIDC_ISSUER`.
 - Release workflow: image, CycloneDX SBOM, grype scan, push to GHCR
   by tag and digest, and a release pull request in `famashines/gitops`.
 

@@ -27,7 +27,10 @@ path gives 401, not 404 (the hooks run before routing).
 ### Auth
 
 kit/auth `createJwtVerifier` with `OIDC_ISSUER`, `OIDC_AUDIENCE` and
-`REQUIRED_ROLE`. The keys come from `<OIDC_ISSUER>/protocol/openid-connect/certs`.
+`REQUIRED_ROLE`. The keys come from `OIDC_JWKS_URL`, or from
+`<OIDC_ISSUER>/protocol/openid-connect/certs` when it is not set. The token
+`iss` must always be `OIDC_ISSUER`. On the cluster `OIDC_JWKS_URL` is the
+in-cluster Keycloak URL, so the pod does not go out through Traefik.
 
 | Case                               | Answer                                             |
 | ---------------------------------- | -------------------------------------------------- |
@@ -104,19 +107,20 @@ services as `x-correlation-id`. OpenTelemetry sends `traceparent`.
 Read once at start with zod (kit/config); a bad value stops the process.
 `.env.example` has the names, with no values.
 
-| Variable                                                            | Default                                         |
-| ------------------------------------------------------------------- | ----------------------------------------------- |
-| `ORCHESTRATION_URL`                                                 | required, `http` or `https` origin              |
-| `PROJECTIONS_URL`                                                   | required, `http` or `https` origin              |
-| `OIDC_ISSUER`                                                       | `https://auth.famashines.com/realms/ai-systems` |
-| `OIDC_AUDIENCE`                                                     | `ai-systems-app`                                |
-| `REQUIRED_ROLE`                                                     | `owner`                                         |
-| `PORT`                                                              | `8080`                                          |
-| `LOG_LEVEL`                                                         | `info`                                          |
-| `RELEASE`                                                           | `local`                                         |
-| `SERVICE_NAME`                                                      | `ai-systems-api-gateway`                        |
-| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | none: no trace export                           |
-| `OTEL_RESOURCE_ATTRIBUTES`                                          | none                                            |
+| Variable                                                            | Default                                             |
+| ------------------------------------------------------------------- | --------------------------------------------------- |
+| `ORCHESTRATION_URL`                                                 | required, `http` or `https` origin                  |
+| `PROJECTIONS_URL`                                                   | required, `http` or `https` origin                  |
+| `OIDC_ISSUER`                                                       | `https://auth.famashines.com/realms/ai-systems`     |
+| `OIDC_JWKS_URL`                                                     | none: `<OIDC_ISSUER>/protocol/openid-connect/certs` |
+| `OIDC_AUDIENCE`                                                     | `ai-systems-app`                                    |
+| `REQUIRED_ROLE`                                                     | `owner`                                             |
+| `PORT`                                                              | `8080`                                              |
+| `LOG_LEVEL`                                                         | `info`                                              |
+| `RELEASE`                                                           | `local`                                             |
+| `SERVICE_NAME`                                                      | `ai-systems-api-gateway`                            |
+| `OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` | none: no trace export                               |
+| `OTEL_RESOURCE_ATTRIBUTES`                                          | none                                                |
 
 The upstream path replaces the path of the URL, so give an origin only,
 for example `http://ai-systems-orchestration:8080`.
