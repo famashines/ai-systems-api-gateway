@@ -25,7 +25,7 @@
   },
   "dependencies": {
     "@famashines/ai-systems-contracts": "github:famashines/ai-systems-contracts#v0.1.0",
-    "@famashines/ai-systems-kit": "github:famashines/ai-systems-kit#e4572952767988d1c9a696f90260c27fdbdd9634",
+    "@famashines/ai-systems-kit": "github:famashines/ai-systems-kit#11cb81cd6878feb457d09a63901b1432e0a20d75",
     "zod": "4.6.7"
   },
   "devDependencies": {
@@ -38,7 +38,7 @@
     "typescript-eslint": "8.72.1"
   },
   "allowScripts": {
-    "github:famashines/ai-systems-kit#e4572952767988d1c9a696f90260c27fdbdd9634": true,
+    "github:famashines/ai-systems-kit#11cb81cd6878feb457d09a63901b1432e0a20d75": true,
     "github:famashines/ai-systems-contracts#09f6c8c5385e90dd96cdc81fbd5c8c44d7e92257": true,
     "protobufjs": false
   }
