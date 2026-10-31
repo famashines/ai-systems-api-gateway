@@ -5,9 +5,17 @@ import type { AddressInfo } from "node:net";
 import { after, before, beforeEach, describe, test } from "node:test";
 import { createJwtVerifier } from "@famashines/ai-systems-kit/auth";
 import { loadConfig } from "@famashines/ai-systems-kit/config";
-import type { Service } from "@famashines/ai-systems-kit/http";
+import {
+  ConflictError,
+  createService,
+  validate,
+  ValidationError,
+  type Service,
+} from "@famashines/ai-systems-kit/http";
 import { createLogger } from "@famashines/ai-systems-kit/observability";
+import { CommandEnvelopeV1, SubmitTaskCommandPayloadV1 } from "@famashines/ai-systems-contracts";
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
+import { z } from "zod";
 import { createApp, type AppOptions } from "./app.ts";
 import { Env } from "./env.ts";
 
@@ -371,6 +379,77 @@ describe("POST /api/tasks", () => {
       assert.equal(response.status, 502);
       assert.equal((await problemOf(response)).code, "unavailable");
     }
+  });
+});
+
+describe("with a kit service like orchestration PR #1", () => {
+  const SubmitTaskBody = CommandEnvelopeV1(SubmitTaskCommandPayloadV1).extend({
+    type: z.literal("orchestration.SubmitTask"),
+    expectedVersion: z.literal(0).exactOptional(),
+  });
+
+  test("201 and 200 give 202; 400 with errors and 409 pass through", async () => {
+    const answers = new Map<string, { taskId: string; version: number }>();
+    const upstream = createService({
+      logger,
+      drainDelayMs: 0,
+      routes: [
+        {
+          method: "POST",
+          path: "/internal/commands/submit-task",
+          handler: async (request) => {
+            const { body } = await validate(request, { body: SubmitTaskBody });
+            if (body.payload.text === "clash") throw new ConflictError();
+            if (body.payload.text === "refused") {
+              throw new ValidationError("The request is not valid", [
+                { path: "body.payload.text", code: "custom", message: "refused" },
+              ]);
+            }
+            const known = answers.get(body.commandId);
+            const answer = known ?? { taskId: randomUUID(), version: 1 };
+            answers.set(body.commandId, answer);
+            return { status: known ? 200 : 201, body: answer };
+          },
+        },
+      ],
+    });
+    services.push(upstream);
+    const { port } = await upstream.listen(0, "127.0.0.1");
+    const call = await start({ orchestrationUrl: `http://127.0.0.1:${String(port)}` });
+    const key = randomUUID();
+    const first = await call(
+      "/api/tasks",
+      await submit({ text: "Write a poem", mode: "auto" }, key),
+    );
+    const again = await call(
+      "/api/tasks",
+      await submit({ text: "Write a poem", mode: "auto" }, key),
+    );
+    assert.equal(first.status, 202);
+    assert.equal(again.status, 202);
+    const body = (await first.json()) as { taskId: string; version: number };
+    assert.deepEqual(await again.json(), body);
+    assert.equal(body.version, 1);
+    assert.equal(first.headers.get("location"), `/api/tasks/${body.taskId}`);
+    assert.equal(answers.size, 1);
+
+    const refused = await call("/api/tasks", await submit({ text: "refused" }));
+    assert.equal(refused.status, 400);
+    const problem = (await problemOf(refused)) as unknown as {
+      code: string;
+      instance: string;
+      errors: { path: string }[];
+    };
+    assert.equal(problem.code, "validation_failed");
+    assert.equal(problem.instance, "/api/tasks");
+    assert.deepEqual(
+      problem.errors.map((issue) => issue.path),
+      ["body.payload.text"],
+    );
+
+    const clash = await call("/api/tasks", await submit({ text: "clash" }));
+    assert.equal(clash.status, 409);
+    assert.equal((await problemOf(clash)).code, "conflict");
   });
 });
 
