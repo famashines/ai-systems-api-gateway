@@ -10,6 +10,7 @@ import {
   EditPlanCommandPayloadV1,
   Id,
   MessageIntent,
+  ModelListResultV1,
   PauseRunCommandPayloadV1,
   PostOwnerMessageCommandPayloadV1,
   ProblemJson,
@@ -48,6 +49,7 @@ export interface AppOptions {
   conversationHubUrl: string;
   projectionsUrl: string;
   budgetUrl: string;
+  aiProxyUrl: string;
   logger: ServiceOptions["logger"];
   metrics?: ServiceOptions["metrics"];
   closeHooks?: ServiceOptions["closeHooks"];
@@ -91,6 +93,8 @@ const passedStatuses = new Set([400, 409, 413, 415, 422]);
 const passedWithNotFound = new Set([...passedStatuses, 404]);
 
 const passedWithForbidden = new Set([...passedStatuses, 403]);
+
+const passedWithUnavailable = new Set([...passedStatuses, 503]);
 
 const passedOwnerCommand = new Set([...passedWithForbidden, 404]);
 
@@ -442,6 +446,18 @@ export function createApp(options: AppOptions): Service {
       method: "GET",
       path: "/api/agents",
       handler: (request) => list(request, "/internal/agents", AgentListResultV1, NoQuery),
+    },
+    {
+      method: "GET",
+      path: "/api/models",
+      handler: async (request) => {
+        const url = new URL("/internal/models", options.aiProxyUrl);
+        const upstream = await call("ai-proxy", url, request);
+        if (upstream.status !== 200) return problem(upstream, request, passedWithUnavailable);
+        const models = ModelListResultV1.safeParse(upstream.body);
+        if (!models.success) throw badGateway();
+        return { body: models.data };
+      },
     },
   ];
 

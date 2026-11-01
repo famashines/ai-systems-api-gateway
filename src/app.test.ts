@@ -84,10 +84,12 @@ const orchestration = fake();
 const conversationHub = fake();
 const projections = fake();
 const budget = fake();
+const aiProxy = fake();
 let orchestrationUrl: string;
 let conversationHubUrl: string;
 let projectionsUrl: string;
 let budgetUrl: string;
+let aiProxyUrl: string;
 const services: Service[] = [];
 
 before(async () => {
@@ -102,6 +104,7 @@ before(async () => {
   conversationHubUrl = await listen(conversationHub.server);
   projectionsUrl = await listen(projections.server);
   budgetUrl = await listen(budget.server);
+  aiProxyUrl = await listen(aiProxy.server);
 });
 
 after(async () => {
@@ -112,6 +115,7 @@ after(async () => {
     conversationHub.server,
     projections.server,
     budget.server,
+    aiProxy.server,
   ]) {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
@@ -123,6 +127,7 @@ beforeEach(() => {
   conversationHub.seen.length = 0;
   projections.seen.length = 0;
   budget.seen.length = 0;
+  aiProxy.seen.length = 0;
 });
 
 const now = (): number => Math.floor(Date.now() / 1000);
@@ -154,6 +159,7 @@ const start = async (options: Partial<AppOptions> = {}) => {
     conversationHubUrl,
     projectionsUrl,
     budgetUrl,
+    aiProxyUrl,
     logger,
     drainDelayMs: 0,
     ...options,
@@ -216,6 +222,7 @@ describe("auth", () => {
         ["GET", `/api/conversations/${randomUUID()}/messages`],
         ["GET", "/api/budget"],
         ["GET", "/api/agents"],
+        ["GET", "/api/models"],
         ["GET", "/api/unknown"],
         ["DELETE", "/nothing"],
       ] as const) {
@@ -226,7 +233,10 @@ describe("auth", () => {
       }
     }
     assert.equal(
-      orchestration.seen.length + conversationHub.seen.length + projections.seen.length,
+      orchestration.seen.length +
+        conversationHub.seen.length +
+        projections.seen.length +
+        aiProxy.seen.length,
       0,
     );
   });
@@ -797,6 +807,21 @@ describe("POST /api/conversations/:id/messages", () => {
     });
   });
 
+  test("passes the model and the effort of a new task to conversation-hub", async () => {
+    posting();
+    const call = await start();
+    const key = randomUUID();
+    const message = { text: "Write a poem", model: "openai/gpt-5", effort: "high" };
+    const response = await call(path, await submit(message, key));
+    assert.equal(response.status, 202);
+    assert.deepEqual(conversationHub.seen[0]?.body, {
+      commandId: key,
+      type: "conversation.PostOwnerMessage",
+      actor: { kind: "owner", id: "owner-1" },
+      payload: { conversationId, ...message, newTask: false },
+    });
+  });
+
   test("the same key twice gives the same message", async () => {
     const answers = posting();
     const call = await start();
@@ -827,7 +852,12 @@ describe("POST /api/conversations/:id/messages", () => {
       [path, { text: "Hi", taskId: randomUUID(), newTask: true }, "body.taskId"],
       [path, { text: "Hi", newTask: "yes" }, "body.newTask"],
       [path, { text: "Hi", mode: "fast" }, "body.mode"],
-      [path, { text: "Hi", taskId: randomUUID(), mode: "auto" }, "body.mode"],
+      [path, { text: "Hi", taskId: randomUUID(), mode: "auto" }, "body.taskId"],
+      [path, { text: "Hi", taskId: randomUUID(), model: "openai/gpt-5" }, "body.taskId"],
+      [path, { text: "Hi", taskId: randomUUID(), effort: "high" }, "body.taskId"],
+      [path, { text: "Hi", effort: "high" }, "body.effort"],
+      [path, { text: "Hi", model: "gpt 5" }, "body.model"],
+      [path, { text: "Hi", model: "openai/gpt-5", effort: "huge" }, "body.effort"],
       [path, [], "body"],
       ["/api/conversations/not-a-uuid/messages", { text: "Hi" }, "params.id"],
       [`/api/conversations/${randomUUID().toUpperCase()}/messages`, { text: "Hi" }, "params.id"],
@@ -1547,6 +1577,109 @@ describe("GET /api/agents", () => {
   });
 });
 
+describe("GET /api/models", () => {
+  const models = {
+    items: [
+      {
+        id: "anthropic/claude-opus-4.8",
+        name: "Anthropic: Claude Opus 4.8",
+        efforts: ["max", "xhigh", "high", "medium", "low", "none"],
+        defaultEffort: "high",
+      },
+      { id: "openai/gpt-4.1-nano", name: "OpenAI: GPT-4.1 Nano", efforts: [] },
+    ],
+  };
+
+  test("gives the model list from ai-proxy, with no Authorization", async () => {
+    aiProxy.set((_seen, response) => {
+      json(response, 200, models);
+    });
+    const call = await start();
+    const correlationId = randomUUID();
+    const response = await call("/api/models?limit=5", {
+      headers: await authed({ "x-correlation-id": correlationId }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), models);
+    assert.equal(aiProxy.seen.length, 1);
+    const sent = aiProxy.seen[0];
+    assert.ok(sent);
+    assert.equal(sent.method, "GET");
+    assert.equal(sent.url, "/internal/models");
+    assert.equal(sent.headers["x-correlation-id"], correlationId);
+    assert.equal(sent.headers.authorization, undefined);
+    assert.equal(projections.seen.length, 0);
+  });
+
+  test("a 503 or 400 from ai-proxy passes through; other answers give 502 or 503", async () => {
+    const call = await start();
+    for (const [status, code] of [
+      [503, "unavailable"],
+      [400, "validation_failed"],
+    ] as const) {
+      aiProxy.set((_seen, response) => {
+        json(
+          response,
+          status,
+          { type: "about:blank", title: "No", status, code, detail: "No" },
+          "application/problem+json",
+        );
+      });
+      const passed = await call("/api/models", { headers: await authed() });
+      assert.equal(passed.status, status);
+      const problem = await problemOf(passed);
+      assert.equal(problem.code, code);
+      assert.equal(problem.instance, "/api/models");
+    }
+    const bad: Behaviour[] = [
+      (_seen, response) => {
+        json(response, 200, { items: [{ id: "no-slash", name: "x", efforts: [] }] });
+      },
+      (_seen, response) => {
+        json(response, 200, {
+          items: [{ id: "openai/gpt-5", name: "GPT-5", efforts: ["huge"] }],
+        });
+      },
+      (_seen, response) => {
+        json(response, 200, { items: Array.from({ length: 1001 }, () => models.items[1]) });
+      },
+      (_seen, response) => {
+        json(response, 404, {
+          type: "about:blank",
+          title: "Not Found",
+          status: 404,
+          code: "not_found",
+        });
+      },
+      (_seen, response) => {
+        json(response, 500, { type: "x", title: "x", status: 500, code: "internal" });
+      },
+      (_seen, response) => response.writeHead(200).end("not json"),
+    ];
+    for (const answer of bad) {
+      aiProxy.set(answer);
+      const response = await call("/api/models", { headers: await authed() });
+      assert.equal(response.status, 502);
+      assert.equal((await problemOf(response)).code, "unavailable");
+    }
+    const closed = createServer();
+    const url = await listen(closed);
+    await new Promise((resolve) => closed.close(resolve));
+    const down = await start({ aiProxyUrl: url });
+    const response = await down("/api/models", { headers: await authed() });
+    assert.equal(response.status, 503);
+    assert.equal((await problemOf(response)).code, "unavailable");
+  });
+
+  test("the route needs the owner role", async () => {
+    const call = await start();
+    const token = await sign({ realm_access: { roles: [] } });
+    const response = await call("/api/models", { headers: { authorization: `Bearer ${token}` } });
+    assert.equal(response.status, 403);
+    assert.equal(aiProxy.seen.length, 0);
+  });
+});
+
 describe("upstream body limit", () => {
   test("an answer over 1 MiB gives 502, with or without content-length", async () => {
     const call = await start();
@@ -1621,6 +1754,7 @@ describe("env", () => {
     assert.equal(config.REQUIRED_ROLE, "owner");
     assert.equal(config.CONVERSATION_HUB_URL, "http://ai-systems-conversation-hub:8080");
     assert.equal(config.BUDGET_URL, "http://ai-systems-budget:8080");
+    assert.equal(config.AI_PROXY_URL, "http://ai-systems-ai-proxy:8080");
     assert.equal(config.PORT, 8080);
     assert.throws(() =>
       loadConfig(Env, { ORCHESTRATION_URL: "file:///etc/passwd", PROJECTIONS_URL: "x" }),

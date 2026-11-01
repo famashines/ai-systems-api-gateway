@@ -10,6 +10,7 @@ export const Env = commonEnv.extend({
   CONVERSATION_HUB_URL: httpUrl.default("http://ai-systems-conversation-hub:8080"),
   PROJECTIONS_URL: httpUrl,
   BUDGET_URL: httpUrl.default("http://ai-systems-budget:8080"),
+  AI_PROXY_URL: httpUrl.default("http://ai-systems-ai-proxy:8080"),
   OIDC_ISSUER: httpUrl.default("https://auth.famashines.com/realms/ai-systems"),
   OIDC_JWKS_URL: httpUrl.optional(),
   OIDC_AUDIENCE: z.string().min(1).default("ai-systems-app"),

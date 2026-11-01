@@ -15,6 +15,7 @@ app --HTTPS /api--> Traefik --> api-gateway
                                   +--POST--> budget           /internal/commands/set-budget (with Authorization)
                                   +--GET---> projections      /internal/tasks
                                   +--GET---> projections      /internal/conversations/<id>/messages
+                                  +--GET---> ai-proxy         /internal/models
 ```
 
 ## Routes
@@ -33,6 +34,7 @@ app --HTTPS /api--> Traefik --> api-gateway
 | `GET /api/budget?month=`                    | the budget of a month (below)               |
 | `POST /api/budget`                          | set the monthly cap (below)                 |
 | `GET /api/agents`                           | the agent list (below)                      |
+| `GET /api/models`                           | the model list (below)                      |
 
 All other paths need a valid token too: with no valid token, an unknown
 path gives 401, not 404 (the hooks run before routing).
@@ -118,7 +120,7 @@ Request:
 - `:id` is the `taskId`: a lower-case UUID v4, else 400 with the path
   `params.id`. A `taskId` in the body is replaced by `:id`.
 - Header `Idempotency-Key`: the same rule as `POST /api/tasks`.
-- Body: the fields of the command payload of contracts v0.4.1
+- Body: the fields of the command payload of contracts v0.5.0
   (`ApprovePlanCommandPayloadV1` and the others), else 400 with no
   upstream call.
 
@@ -167,14 +169,17 @@ Request:
 - `:id` is the `conversationId`: a lower-case UUID v4, else 400 with the
   path `params.id`. The first message to a new id starts the thread.
 - Header `Idempotency-Key`: the same rule as `POST /api/tasks`.
-- Body: `{ text, taskId?, newTask?, mode? }`, the fields of
-  `PostOwnerMessageCommandPayloadV1` (contracts v0.4.1). `newTask` is
+- Body: `{ text, taskId?, newTask?, mode?, model?, effort? }`, the fields
+  of `PostOwnerMessageCommandPayloadV1` (contracts v0.5.0). `newTask` is
   `false` by default. `taskId` together with `newTask: true` is refused
-  (400, path `body.taskId`). `mode` (`auto` or `approval`) is the mode of
-  a new task. `taskId` together with `mode` is refused (400, path
-  `body.mode`). conversation-hub copies `mode` into the event only for a
-  `new_task`. A `conversationId` in the body is replaced by
-  `:id`.
+  (400, path `body.taskId`). `mode` (`auto` or `approval`), `model` (a
+  contracts `ModelId`, for example `openai/gpt-5`) and `effort` (a
+  `ReasoningEffort`: `max`, `xhigh`, `high`, `medium`, `low`, `minimal` or
+  `none`) are for a new task. `taskId` together with `mode`, `model` or
+  `effort` is refused (400, path `body.taskId`). `effort` with no `model`
+  is refused (400, path `body.effort`). conversation-hub copies `mode`,
+  `model` and `effort` into the event only for a `new_task`. A
+  `conversationId` in the body is replaced by `:id`.
 
 The gateway sends this `CommandEnvelopeV1` to
 `POST <CONVERSATION_HUB_URL>/internal/commands/post-owner-message`:
@@ -246,6 +251,18 @@ a task of the thread. The same key again gives the same message.
 - No query. Forwards to `GET <PROJECTIONS_URL>/internal/agents` and gives
   `AgentListResultV1`. A 404 or a bad answer is 502.
 
+### `GET /api/models`
+
+- The models that the OpenRouter key of ai-proxy can use, for the model
+  choice of a task. No query; other query keys are dropped.
+- Forwards to `GET <AI_PROXY_URL>/internal/models` and gives
+  `ModelListResultV1` (at most 1000 items, sorted by `name`; each item has
+  `id`, `name`, `efforts`, highest first, and an optional
+  `defaultEffort`). The answer is checked with zod; a bad answer is 502.
+- Problem JSON with 503 (ai-proxy has no model list) or with 400, 409,
+  413, 415 or 422 passes through. A 404 or another answer is 502.
+- Read only: no `Authorization` header goes to ai-proxy.
+
 ### `POST /api/budget`
 
 Sets the monthly hard cap and an optional soft cap. The same path as the
@@ -254,7 +271,7 @@ month view, because it changes that view.
 Request:
 
 - Header `Idempotency-Key`: the same rule as `POST /api/tasks`.
-- Body: `SetBudgetCommandPayloadV1` (contracts v0.4.1):
+- Body: `SetBudgetCommandPayloadV1` (contracts v0.5.0):
   `{ scope: { kind: "month" }, hardCapMicroUsd, softCapMicroUsd? }`,
   integer micro-USD, at most 1,000,000,000,000, the soft cap not above the
   hard cap. Else 400 with no upstream call.
@@ -277,7 +294,8 @@ the request to the upstream. Only the routes to an upstream that checks
 the owner token send it: `POST /api/budget`,
 `POST /api/conversations/:id/messages`, `POST /api/tasks` and
 `POST /api/tasks/:id/<control>`. All other routes send only `accept`,
-`content-type` and `x-correlation-id` (all routes to projections). There are no routes to
+`content-type` and `x-correlation-id` (all routes to projections and
+`GET /api/models`). There are no routes to
 the commands of prompt-studio and agent-manager yet. When they come, they
 must forward the header too (those services check the token, M2-17).
 
@@ -316,6 +334,7 @@ Read once at start with zod (kit/config); a bad value stops the process.
 | `CONVERSATION_HUB_URL`                                              | `http://ai-systems-conversation-hub:8080`           |
 | `PROJECTIONS_URL`                                                   | required, `http` or `https` origin                  |
 | `BUDGET_URL`                                                        | `http://ai-systems-budget:8080`                     |
+| `AI_PROXY_URL`                                                      | `http://ai-systems-ai-proxy:8080`                   |
 | `OIDC_ISSUER`                                                       | `https://auth.famashines.com/realms/ai-systems`     |
 | `OIDC_JWKS_URL`                                                     | none: `<OIDC_ISSUER>/protocol/openid-connect/certs` |
 | `OIDC_AUDIENCE`                                                     | `ai-systems-app`                                    |
@@ -377,6 +396,13 @@ repo. A manual run (`workflow_dispatch`) works only on `main`.
 - On the cluster, `POST /api/budget` needs a NetworkPolicy that lets
   api-gateway connect to budget on port 8080 (egress of api-gateway,
   ingress of budget). The policy is in `platform/gitops`.
+- On the cluster, `GET /api/models` needs a NetworkPolicy that lets
+  api-gateway connect to ai-proxy on port 8080 (egress of api-gateway,
+  ingress of ai-proxy). The policy is in `platform/gitops`.
+- The upstream timeout is 5 s. ai-proxy waits up to 10 s for the OpenRouter
+  model list when its cache is empty or older than 6 hours. Then the first
+  `GET /api/models` can give 503 while ai-proxy fills its cache; a retry
+  gets the list.
 - Requests with a bad token are not rate limited here (there is no
   subject). Traefik limits them. A bad token costs one RS256 check, and an
   unknown `kid` causes at most one JWKS fetch each 30 s (each 5 s while
