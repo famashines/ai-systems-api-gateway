@@ -109,8 +109,10 @@ Request:
 - Body: `{ text, taskId?, newTask?, mode? }`, the fields of
   `PostOwnerMessageCommandPayloadV1` (contracts v0.4.1). `newTask` is
   `false` by default. `taskId` together with `newTask: true` is refused
-  (400, path `body.taskId`), and `taskId` together with `mode` too (400,
-  path `body.mode`). A `conversationId` in the body is replaced by
+  (400, path `body.taskId`). `mode` (`auto` or `approval`) is the mode of
+  a new task. `taskId` together with `mode` is refused (400, path
+  `body.mode`). conversation-hub copies `mode` into the event only for a
+  `new_task`. A `conversationId` in the body is replaced by
   `:id`.
 
 The gateway sends this `CommandEnvelopeV1` to

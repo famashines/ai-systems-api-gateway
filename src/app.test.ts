@@ -762,6 +762,20 @@ describe("POST /api/conversations/:id/messages", () => {
     assert.equal(orchestration.seen.length, 0);
   });
 
+  test("passes the mode of a new task to conversation-hub", async () => {
+    posting();
+    const call = await start();
+    const key = randomUUID();
+    const response = await call(path, await submit({ text: "Write a poem", mode: "auto" }, key));
+    assert.equal(response.status, 202);
+    assert.deepEqual(conversationHub.seen[0]?.body, {
+      commandId: key,
+      type: "conversation.PostOwnerMessage",
+      actor: { kind: "owner", id: "owner-1" },
+      payload: { conversationId, text: "Write a poem", newTask: false, mode: "auto" },
+    });
+  });
+
   test("the same key twice gives the same message", async () => {
     const answers = posting();
     const call = await start();
@@ -791,6 +805,7 @@ describe("POST /api/conversations/:id/messages", () => {
       [path, { text: "Hi", taskId: "x" }, "body.taskId"],
       [path, { text: "Hi", taskId: randomUUID(), newTask: true }, "body.taskId"],
       [path, { text: "Hi", newTask: "yes" }, "body.newTask"],
+      [path, { text: "Hi", mode: "fast" }, "body.mode"],
       [path, { text: "Hi", taskId: randomUUID(), mode: "auto" }, "body.mode"],
       [path, [], "body"],
       ["/api/conversations/not-a-uuid/messages", { text: "Hi" }, "params.id"],
