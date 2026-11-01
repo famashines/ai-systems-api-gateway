@@ -1352,6 +1352,26 @@ describe("POST /api/tasks/:id/<control>", () => {
     assert.equal(problem.instance, `/api/tasks/${taskId}/pause-run`);
   });
 
+  test("an edit near the plan limit of 200,000 bytes reaches orchestration in full", async () => {
+    accepting();
+    const call = await start();
+    const big = Array.from({ length: 20 }, () => ({
+      ...subtasks[0],
+      subtaskId: randomUUID(),
+      title: "t".repeat(200),
+      instructions: "\u00e9".repeat(4000),
+    }));
+    const bytes = new TextEncoder().encode(JSON.stringify(big)).length;
+    assert.ok(bytes > 150_000 && bytes <= 200_000, String(bytes));
+    const response = await call(
+      `/api/tasks/${taskId}/edit-plan`,
+      await submit({ planVersion: 1, subtasks: big }),
+    );
+    assert.equal(response.status, 202);
+    const sent = orchestration.seen[0]?.body as { payload: { subtasks: unknown[] } };
+    assert.deepEqual(sent.payload.subtasks, big);
+  });
+
   test("a bad key, id or body gives 400 with no upstream call", async () => {
     const call = await start();
     const noKey = await call(`/api/tasks/${taskId}/approve-plan`, {
