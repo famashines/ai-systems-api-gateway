@@ -263,10 +263,10 @@ describe("POST /api/tasks", () => {
     const call = await start();
     const key = randomUUID();
     const correlationId = randomUUID();
-    const response = await call(
-      "/api/tasks",
-      await submit({ text: "Write a plan" }, key, { "x-correlation-id": correlationId }),
-    );
+    const request = await submit({ text: "Write a plan" }, key, {
+      "x-correlation-id": correlationId,
+    });
+    const response = await call("/api/tasks", request);
     assert.equal(response.status, 202);
     const body = (await response.json()) as { taskId: string; version: number };
     assert.deepEqual(Object.keys(body).sort(), ["taskId", "version"]);
@@ -277,7 +277,7 @@ describe("POST /api/tasks", () => {
     assert.equal(sent.method, "POST");
     assert.equal(sent.url, "/internal/commands/submit-task");
     assert.equal(sent.headers["x-correlation-id"], correlationId);
-    assert.equal(sent.headers.authorization, undefined);
+    assert.equal(sent.headers.authorization, request.headers.authorization);
     assert.deepEqual(sent.body, {
       commandId: key,
       type: "orchestration.SubmitTask",
@@ -382,9 +382,24 @@ describe("POST /api/tasks", () => {
     ]);
   });
 
+  test("a 403 from orchestration (another sub or no owner role) passes through", async () => {
+    orchestration.set((_seen, response) => {
+      json(
+        response,
+        403,
+        { type: "about:blank", title: "Forbidden", status: 403, code: "forbidden" },
+        "application/problem+json",
+      );
+    });
+    const call = await start();
+    const response = await call("/api/tasks", await submit({ text: "Hi" }));
+    assert.equal(response.status, 403);
+    assert.equal((await problemOf(response)).code, "forbidden");
+  });
+
   test("other upstream statuses give 502 with a generic detail and no upstream fields", async () => {
     const call = await start();
-    for (const status of [500, 401, 403, 404, 429, 503]) {
+    for (const status of [500, 401, 404, 429, 503]) {
       orchestration.set((_seen, response) => {
         json(
           response,
@@ -452,7 +467,7 @@ describe("POST /api/tasks", () => {
   });
 });
 
-describe("with a kit service like orchestration PR #1", () => {
+describe("with a kit service like orchestration that checks the owner token", () => {
   const SubmitTaskBody = CommandEnvelopeV1(SubmitTaskCommandPayloadV1).extend({
     type: z.literal("orchestration.SubmitTask"),
     expectedVersion: z.literal(0).exactOptional(),
@@ -463,12 +478,18 @@ describe("with a kit service like orchestration PR #1", () => {
     const upstream = createService({
       logger,
       drainDelayMs: 0,
+      before: [
+        bearerHook(
+          createJwtVerifier({ issuer, audience: "ai-systems-app", requiredRole: "owner", jwksUrl }),
+        ),
+      ],
       routes: [
         {
           method: "POST",
           path: "/internal/commands/submit-task",
           handler: async (request) => {
             const { body } = await validate(request, { body: SubmitTaskBody });
+            if (body.actor.id !== subjectOf(request).sub) throw new ForbiddenError();
             if (body.payload.text === "clash") throw new ConflictError();
             if (body.payload.text === "refused") {
               throw new ValidationError("The request is not valid", [
@@ -1115,9 +1136,6 @@ describe("POST /api/budget", () => {
       actor: { kind: "owner", id: "owner-1" },
       payload: cap,
     });
-    replaying();
-    await call("/api/tasks", await submit({ text: "Write a poem" }));
-    assert.equal(orchestration.seen[0]?.headers.authorization, undefined);
     projections.set((_seen, response) => {
       json(response, 200, empty);
     });
@@ -1289,7 +1307,7 @@ describe("POST /api/tasks/:id/<control>", () => {
     }
   });
 
-  test("the token goes only to the owner command routes, not to submit-task or projections", async () => {
+  test("the token goes to the owner command routes and submit-task, not to projections", async () => {
     accepting();
     const call = await start();
     assert.equal((await call(`/api/tasks/${taskId}/pause-run`, await submit({}))).status, 202);
@@ -1299,7 +1317,7 @@ describe("POST /api/tasks/:id/<control>", () => {
     assert.ok(paused && submitted);
     assert.match(paused.headers.authorization ?? "", /^Bearer /);
     assert.equal(submitted.url, "/internal/commands/submit-task");
-    assert.equal(submitted.headers.authorization, undefined);
+    assert.match(submitted.headers.authorization ?? "", /^Bearer /);
     projections.set((_seen, response) => {
       json(response, 404, { type: "about:blank", title: "No", status: 404, code: "not_found" });
     });

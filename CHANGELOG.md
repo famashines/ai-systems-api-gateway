@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- `POST /api/tasks` forwards the `Authorization` header of the owner to
+  orchestration, which checks the owner token on `submit-task` now (ADR
+  0028, SubmitTask can start a paid plan call). A 403 from orchestration
+  passes through. Deploy this version before the orchestration version
+  that checks the token. The projections routes still send no
+  `Authorization` header.
+
 - `POST /api/tasks/:id/<control>` for the owner controls of M3-04:
   `approve-plan`, `edit-plan`, `reject-plan`, `pause-run`, `resume-run`,
   `cancel-run`, `cancel-task`, `retry-subtask`, `reassign-subtask`,
