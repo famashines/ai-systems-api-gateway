@@ -266,8 +266,11 @@ export function createApp(options: AppOptions): Service {
           new URL("/internal/commands/post-owner-message", options.conversationHubUrl),
           request,
           command,
+          { authorization: request.headers.authorization ?? "" },
         );
-        if (upstream.status !== 200 && upstream.status !== 201) return problem(upstream, request);
+        if (upstream.status !== 200 && upstream.status !== 201) {
+          return problem(upstream, request, passedWithForbidden);
+        }
         const posted = Posted.safeParse(upstream.body);
         if (!posted.success || posted.data.conversationId !== body.conversationId) {
           throw badGateway();

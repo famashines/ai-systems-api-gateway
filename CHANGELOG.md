@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `POST /api/conversations/:id/messages` forwards the `Authorization`
+  header of the owner to conversation-hub, which checks the owner token
+  now (M2-17, ADR 0028). A 403 from conversation-hub passes through. Only
+  this route and `POST /api/budget` forward the header.
+
 - `POST /api/budget`: `Idempotency-Key` check, `SetBudget` command to
   budget (`/internal/commands/set-budget`) with the `Authorization` header
   of the owner (only on this route), 202 with `{ version }`. 400, 403 and

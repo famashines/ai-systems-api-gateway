@@ -10,7 +10,7 @@ app --HTTPS /api--> Traefik --> api-gateway
                                   | rate limit for each subject: 429
                                   | zod checks: 400
                                   +--POST--> orchestration    /internal/commands/submit-task
-                                  +--POST--> conversation-hub /internal/commands/post-owner-message
+                                  +--POST--> conversation-hub /internal/commands/post-owner-message (with Authorization)
                                   +--POST--> budget           /internal/commands/set-budget (with Authorization)
                                   +--GET---> projections      /internal/tasks
                                   +--GET---> projections      /internal/conversations/<id>/messages
@@ -127,8 +127,13 @@ The gateway sends this `CommandEnvelopeV1` to
 | ---------------------------------------------------------------- | --------------------------------------------- |
 | 201 or 200 with `{ conversationId, messageId, intent, taskId? }` | 202, same body                                |
 | a body with another `conversationId`                             | 502 `unavailable`                             |
-| problem JSON with 400, 409, 413, 415 or 422                      | same status and problem (allowed fields only) |
+| problem JSON with 400, 403, 409, 413, 415 or 422                 | same status and problem (allowed fields only) |
+| 401 (the gateway already accepted the token)                     | 502 `unavailable`                             |
 | other answers, size, timeout and network errors                  | as for `POST /api/tasks`                      |
+
+conversation-hub checks the owner token itself (M2-17, ADR 0028), so
+this route also sends the `Authorization` header of the request.
+conversation-hub gives 403 when `actor.id` is not the token `sub`.
 
 `intent` is `new_task` or `steer` (with the `taskId` that the message
 steers). conversation-hub gives 409 `conflict` for a `taskId` that is not
@@ -186,9 +191,13 @@ The gateway sends this `CommandEnvelopeV1` to
 ```
 
 Budget checks the owner token itself and refuses an `actor.id` that is not
-the token `sub`. So this route, and only this route, also sends the
-`Authorization` header of the request to the upstream. All other routes
-send only `accept`, `content-type` and `x-correlation-id`.
+the token `sub`. So this route also sends the `Authorization` header of
+the request to the upstream. Only the routes to an upstream that checks
+the owner token send it: `POST /api/budget` and
+`POST /api/conversations/:id/messages`. All other routes send only
+`accept`, `content-type` and `x-correlation-id`. There are no routes to
+the commands of prompt-studio and agent-manager yet. When they come, they
+must forward the header too (those services check the token, M2-17).
 
 | Budget answer                                    | Gateway answer                                |
 | ------------------------------------------------ | --------------------------------------------- |

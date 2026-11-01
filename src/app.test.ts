@@ -639,12 +639,12 @@ describe("POST /api/conversations/:id/messages", () => {
     const key = randomUUID();
     const correlationId = randomUUID();
     const taskId = randomUUID();
-    const response = await call(
-      path,
-      await submit({ text: "Make it shorter", taskId, conversationId: randomUUID() }, key, {
-        "x-correlation-id": correlationId,
-      }),
+    const request = await submit(
+      { text: "Make it shorter", taskId, conversationId: randomUUID() },
+      key,
+      { "x-correlation-id": correlationId },
     );
+    const response = await call(path, request);
     assert.equal(response.status, 202);
     const body = (await response.json()) as { messageId: string };
     assert.deepEqual(body, { conversationId, messageId: body.messageId, intent: "steer", taskId });
@@ -654,7 +654,7 @@ describe("POST /api/conversations/:id/messages", () => {
     assert.equal(sent.method, "POST");
     assert.equal(sent.url, "/internal/commands/post-owner-message");
     assert.equal(sent.headers["x-correlation-id"], correlationId);
-    assert.equal(sent.headers.authorization, undefined);
+    assert.equal(sent.headers.authorization, request.headers.authorization);
     assert.deepEqual(sent.body, {
       commandId: key,
       type: "conversation.PostOwnerMessage",
@@ -713,28 +713,35 @@ describe("POST /api/conversations/:id/messages", () => {
     assert.equal(conversationHub.seen.length, 0);
   });
 
-  test("a 409 from conversation-hub passes through, other answers give 502 or 503", async () => {
+  test("a 403 or 409 from conversation-hub passes through, other answers give 502 or 503", async () => {
     const call = await start();
-    conversationHub.set((_seen, response) => {
-      json(
-        response,
-        409,
-        {
-          type: "about:blank",
-          title: "Conflict",
-          status: 409,
-          code: "conflict",
-          detail: "The task is not in this conversation",
-        },
-        "application/problem+json",
-      );
-    });
-    const clash = await call(path, await submit({ text: "Hi", taskId: randomUUID() }));
-    assert.equal(clash.status, 409);
-    const problem = await problemOf(clash);
-    assert.equal(problem.code, "conflict");
-    assert.equal(problem.instance, path);
+    for (const [status, code] of [
+      [403, "forbidden"],
+      [409, "conflict"],
+    ] as const) {
+      conversationHub.set((_seen, response) => {
+        json(
+          response,
+          status,
+          { type: "about:blank", title: "No", status, code, detail: "No" },
+          "application/problem+json",
+        );
+      });
+      const passed = await call(path, await submit({ text: "Hi", taskId: randomUUID() }));
+      assert.equal(passed.status, status);
+      const problem = await problemOf(passed);
+      assert.equal(problem.code, code);
+      assert.equal(problem.instance, path);
+    }
     const bad: Behaviour[] = [
+      (_seen, response) => {
+        json(response, 401, {
+          type: "about:blank",
+          title: "No",
+          status: 401,
+          code: "unauthorized",
+        });
+      },
       (_seen, response) => {
         json(response, 500, { type: "x", title: "x", status: 500, code: "internal" });
       },
@@ -972,7 +979,7 @@ describe("POST /api/budget", () => {
     );
   });
 
-  test("sends the command body and only this route forwards the token", async () => {
+  test("sends the command body; only the owner command routes forward the token", async () => {
     budget.set((_seen, response) => {
       json(response, 201, { version: 3 });
     });
@@ -997,6 +1004,14 @@ describe("POST /api/budget", () => {
     replaying();
     await call("/api/tasks", await submit({ text: "Write a poem" }));
     assert.equal(orchestration.seen[0]?.headers.authorization, undefined);
+    projections.set((_seen, response) => {
+      json(response, 200, empty);
+    });
+    assert.equal((await call("/api/agents", { headers: await authed() })).status, 200);
+    const listed = projections.seen[0];
+    assert.ok(listed);
+    assert.equal(listed.url, "/internal/agents");
+    assert.equal(listed.headers.authorization, undefined);
   });
 
   test("a bad key or body gives 400 with no upstream call", async () => {
