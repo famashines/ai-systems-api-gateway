@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- `POST /api/tasks/:id/<control>` for the owner controls of M3-04:
+  `approve-plan`, `edit-plan`, `reject-plan`, `pause-run`, `resume-run`,
+  `cancel-run`, `cancel-task`, `retry-subtask`, `reassign-subtask`,
+  `set-task-mode` and `resolve-checkpoint`. Each route sends the command
+  to `/internal/commands/<control>` of orchestration with the
+  `Authorization` header of the owner (ADR 0028), and gives 202 with
+  `{ taskId, version }`. 400, 403, 404 and 409 pass through.
+  `POST /api/tasks` and the projections routes still send no
+  `Authorization` header.
+
 - `GET /api/tasks/:id` (`TaskDetailV1`), `GET /api/tasks/:id/output` and
   `GET /api/tasks/:id/subtasks/:sid/output` (`TaskOutputV1`) from
   projections (M3-07). A 404 from projections passes through. No

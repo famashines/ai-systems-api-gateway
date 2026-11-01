@@ -1224,6 +1224,260 @@ describe("POST /api/budget", () => {
   });
 });
 
+describe("POST /api/tasks/:id/<control>", () => {
+  const taskId = randomUUID();
+  const subtaskId = randomUUID();
+  const checkpointId = randomUUID();
+  const subtasks = [
+    {
+      subtaskId,
+      title: "Facts",
+      instructions: "Find the facts.",
+      agentId: randomUUID(),
+      dependsOn: [],
+      needsApproval: false,
+    },
+  ];
+  const controls: [string, string, Record<string, unknown>][] = [
+    ["approve-plan", "ApprovePlan", { planVersion: 2 }],
+    ["edit-plan", "EditPlan", { planVersion: 1, subtasks }],
+    ["reject-plan", "RejectPlan", { planVersion: 1, reason: "Too long." }],
+    ["pause-run", "PauseRun", {}],
+    ["resume-run", "ResumeRun", {}],
+    ["cancel-run", "CancelRun", { reason: "Not needed." }],
+    ["cancel-task", "CancelTask", {}],
+    ["retry-subtask", "RetrySubtask", { subtaskId }],
+    [
+      "reassign-subtask",
+      "ReassignSubtask",
+      { subtaskId, agentId: randomUUID(), model: "openai/gpt-4.1-nano" },
+    ],
+    ["set-task-mode", "SetTaskMode", { mode: "auto" }],
+    ["resolve-checkpoint", "ResolveCheckpoint", { checkpointId, decision: "approved" }],
+  ];
+  const accepting = () => {
+    orchestration.set((seen, response) => {
+      const { payload } = seen.body as { payload: { taskId: string } };
+      json(response, 201, { taskId: payload.taskId, version: 7 });
+    });
+  };
+
+  test("forwards each control to orchestration with the owner token and the task id of the path", async () => {
+    accepting();
+    const call = await start();
+    for (const [path, name, body] of controls) {
+      orchestration.seen.length = 0;
+      const key = randomUUID();
+      const correlationId = randomUUID();
+      const request = await submit({ ...body, taskId: randomUUID() }, key, {
+        "x-correlation-id": correlationId,
+      });
+      const response = await call(`/api/tasks/${taskId}/${path}`, request);
+      assert.equal(response.status, 202, path);
+      assert.deepEqual(await response.json(), { taskId, version: 7 });
+      const sent = orchestration.seen[0];
+      assert.ok(sent);
+      assert.equal(sent.url, `/internal/commands/${path}`);
+      assert.equal(sent.headers.authorization, request.headers.authorization);
+      assert.equal(sent.headers["x-correlation-id"], correlationId);
+      assert.deepEqual(sent.body, {
+        commandId: key,
+        type: `orchestration.${name}`,
+        actor: { kind: "owner", id: "owner-1" },
+        payload: { ...body, taskId },
+      });
+    }
+  });
+
+  test("the token goes only to the owner command routes, not to submit-task or projections", async () => {
+    accepting();
+    const call = await start();
+    assert.equal((await call(`/api/tasks/${taskId}/pause-run`, await submit({}))).status, 202);
+    replaying();
+    assert.equal((await call("/api/tasks", await submit({ text: "Write" }))).status, 202);
+    const [paused, submitted] = orchestration.seen;
+    assert.ok(paused && submitted);
+    assert.match(paused.headers.authorization ?? "", /^Bearer /);
+    assert.equal(submitted.url, "/internal/commands/submit-task");
+    assert.equal(submitted.headers.authorization, undefined);
+    projections.set((_seen, response) => {
+      json(response, 404, { type: "about:blank", title: "No", status: 404, code: "not_found" });
+    });
+    assert.equal((await call(`/api/tasks/${taskId}`, { headers: await authed() })).status, 404);
+    assert.equal(projections.seen[0]?.headers.authorization, undefined);
+  });
+
+  test("an orchestration that checks the token: 201 and 200 give 202, 403 and 409 pass through", async () => {
+    const versions = new Map<string, number>();
+    const upstream = createService({
+      logger,
+      drainDelayMs: 0,
+      before: [
+        bearerHook(
+          createJwtVerifier({ issuer, audience: "ai-systems-app", requiredRole: "owner", jwksUrl }),
+        ),
+      ],
+      routes: [
+        {
+          method: "POST",
+          path: "/internal/commands/pause-run",
+          handler: async (request) => {
+            const { body } = await validate(request, {
+              body: CommandEnvelopeV1(z.object({ taskId: z.string() })),
+            });
+            if (body.actor.id !== subjectOf(request).sub) throw new ForbiddenError();
+            if (versions.size > 0 && !versions.has(body.commandId)) {
+              throw new ConflictError("The run is not running.");
+            }
+            const known = versions.get(body.commandId);
+            versions.set(body.commandId, 3);
+            return { status: known ? 200 : 201, body: { taskId: body.payload.taskId, version: 3 } };
+          },
+        },
+      ],
+    });
+    services.push(upstream);
+    const { port } = await upstream.listen(0, "127.0.0.1");
+    const call = await start({ orchestrationUrl: `http://127.0.0.1:${String(port)}` });
+    const request = await submit({}, randomUUID());
+    const first = await call(`/api/tasks/${taskId}/pause-run`, request);
+    const again = await call(`/api/tasks/${taskId}/pause-run`, request);
+    assert.equal(first.status, 202);
+    assert.equal(again.status, 202);
+    assert.deepEqual(await again.json(), { taskId, version: 3 });
+    const conflict = await call(`/api/tasks/${taskId}/pause-run`, await submit({}));
+    assert.equal(conflict.status, 409);
+    const problem = (await problemOf(conflict)) as unknown as { detail: string; instance: string };
+    assert.equal(problem.detail, "The run is not running.");
+    assert.equal(problem.instance, `/api/tasks/${taskId}/pause-run`);
+  });
+
+  test("an edit near the plan limit of 200,000 bytes reaches orchestration in full", async () => {
+    accepting();
+    const call = await start();
+    const big = Array.from({ length: 20 }, () => ({
+      ...subtasks[0],
+      subtaskId: randomUUID(),
+      title: "t".repeat(200),
+      instructions: "\u00e9".repeat(4000),
+    }));
+    const bytes = new TextEncoder().encode(JSON.stringify(big)).length;
+    assert.ok(bytes > 150_000 && bytes <= 200_000, String(bytes));
+    const response = await call(
+      `/api/tasks/${taskId}/edit-plan`,
+      await submit({ planVersion: 1, subtasks: big }),
+    );
+    assert.equal(response.status, 202);
+    const sent = orchestration.seen[0]?.body as { payload: { subtasks: unknown[] } };
+    assert.deepEqual(sent.payload.subtasks, big);
+  });
+
+  test("a bad key, id or body gives 400 with no upstream call", async () => {
+    const call = await start();
+    const noKey = await call(`/api/tasks/${taskId}/approve-plan`, {
+      method: "POST",
+      headers: await authed({ "content-type": "application/json" }),
+      body: JSON.stringify({ planVersion: 1 }),
+    });
+    assert.equal(noKey.status, 400);
+    const cases: [string, string, unknown, string][] = [
+      [taskId, "approve-plan", {}, "body.planVersion"],
+      [taskId, "approve-plan", { planVersion: 0 }, "body.planVersion"],
+      ["not-a-uuid", "pause-run", {}, "params.id"],
+      [taskId, "edit-plan", { planVersion: 1, subtasks: [] }, "body.subtasks"],
+      [taskId, "reject-plan", { planVersion: 1 }, "body.reason"],
+      [taskId, "retry-subtask", { subtaskId: "x" }, "body.subtaskId"],
+      [taskId, "set-task-mode", { mode: "fast" }, "body.mode"],
+      [taskId, "resolve-checkpoint", { checkpointId, decision: "expired" }, "body.decision"],
+    ];
+    for (const [id, path, body, issuePath] of cases) {
+      const response = await call(`/api/tasks/${id}/${path}`, await submit(body));
+      assert.equal(response.status, 400, path);
+      const problem = (await problemOf(response)) as unknown as { errors: { path: string }[] };
+      assert.ok(
+        problem.errors.some((issue) => issue.path === issuePath),
+        `${issuePath} ${JSON.stringify(problem.errors)}`,
+      );
+    }
+    assert.equal(orchestration.seen.length, 0);
+  });
+
+  test("400, 403, 404 and 409 pass through; other answers give 502 or 503", async () => {
+    const call = await start();
+    const path = `/api/tasks/${taskId}/cancel-run`;
+    for (const [status, code] of [
+      [400, "validation_failed"],
+      [403, "forbidden"],
+      [404, "not_found"],
+      [409, "conflict"],
+    ] as const) {
+      orchestration.set((_seen, response) => {
+        json(
+          response,
+          status,
+          { type: "about:blank", title: "No", status, code },
+          "application/problem+json",
+        );
+      });
+      const response = await call(path, await submit({}));
+      assert.equal(response.status, status);
+      const problem = await problemOf(response);
+      assert.equal(problem.code, code);
+      assert.equal(problem.instance, path);
+    }
+    const bad: Behaviour[] = [
+      (_seen, response) => {
+        json(response, 401, {
+          type: "about:blank",
+          title: "No",
+          status: 401,
+          code: "unauthorized",
+        });
+      },
+      (_seen, response) => {
+        json(response, 503, { type: "about:blank", title: "No", status: 503, code: "unavailable" });
+      },
+      (_seen, response) => {
+        json(response, 201, { taskId: randomUUID(), version: 2 });
+      },
+      (_seen, response) => {
+        json(response, 201, { taskId, version: 0 });
+      },
+      (_seen, response) => response.writeHead(201).end("not json"),
+    ];
+    for (const answer of bad) {
+      orchestration.set(answer);
+      const response = await call(path, await submit({}));
+      assert.equal(response.status, 502);
+      assert.equal((await problemOf(response)).code, "unavailable");
+    }
+    const closed = createServer();
+    const url = await listen(closed);
+    await new Promise((resolve) => closed.close(resolve));
+    const down = await start({ orchestrationUrl: url });
+    assert.equal((await down(path, await submit({}))).status, 503);
+  });
+
+  test("the routes need the owner role and count for the rate limit", async () => {
+    accepting();
+    const call = await start({ rateLimit: { perSecond: 1, burst: 1, now: () => 9_000_000 } });
+    const guest = await call(`/api/tasks/${taskId}/pause-run`, {
+      ...(await submit({})),
+      headers: {
+        authorization: `Bearer ${await sign({ realm_access: { roles: [] } })}`,
+        "content-type": "application/json",
+        "idempotency-key": randomUUID(),
+      },
+    });
+    assert.equal(guest.status, 403);
+    assert.equal(orchestration.seen.length, 0);
+    assert.equal((await call(`/api/tasks/${taskId}/pause-run`, await submit({}))).status, 202);
+    const limited = await call(`/api/tasks/${taskId}/resume-run`, await submit({}));
+    assert.equal(limited.status, 429);
+    assert.equal(orchestration.seen.length, 1);
+  });
+});
+
 describe("GET /api/agents", () => {
   const agents = {
     items: [

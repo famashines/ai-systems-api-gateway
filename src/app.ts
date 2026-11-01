@@ -1,14 +1,25 @@
 import {
   AgentListResultV1,
+  ApprovePlanCommandPayloadV1,
   BudgetMonth,
   BudgetMonthV1,
+  CancelRunCommandPayloadV1,
+  CancelTaskCommandPayloadV1,
   CommandEnvelopeV1,
   ConversationThreadResultV1,
+  EditPlanCommandPayloadV1,
   Id,
   MessageIntent,
+  PauseRunCommandPayloadV1,
   PostOwnerMessageCommandPayloadV1,
   ProblemJson,
+  ReassignSubtaskCommandPayloadV1,
+  RejectPlanCommandPayloadV1,
+  ResolveCheckpointCommandPayloadV1,
+  ResumeRunCommandPayloadV1,
+  RetrySubtaskCommandPayloadV1,
   SetBudgetCommandPayloadV1,
+  SetTaskModeCommandPayloadV1,
   SubmitTaskCommandPayloadV1,
   TaskDetailV1,
   TaskListResultV1,
@@ -80,6 +91,24 @@ const passedStatuses = new Set([400, 409, 413, 415, 422]);
 const passedWithNotFound = new Set([...passedStatuses, 404]);
 
 const passedWithForbidden = new Set([...passedStatuses, 403]);
+
+const passedOwnerCommand = new Set([...passedWithForbidden, 404]);
+
+const ownerCommands = {
+  ApprovePlan: ApprovePlanCommandPayloadV1,
+  EditPlan: EditPlanCommandPayloadV1,
+  RejectPlan: RejectPlanCommandPayloadV1,
+  PauseRun: PauseRunCommandPayloadV1,
+  ResumeRun: ResumeRunCommandPayloadV1,
+  CancelRun: CancelRunCommandPayloadV1,
+  CancelTask: CancelTaskCommandPayloadV1,
+  RetrySubtask: RetrySubtaskCommandPayloadV1,
+  ReassignSubtask: ReassignSubtaskCommandPayloadV1,
+  SetTaskMode: SetTaskModeCommandPayloadV1,
+  ResolveCheckpoint: ResolveCheckpointCommandPayloadV1,
+};
+
+const kebab = (name: string): string => name.replace(/(?<!^)[A-Z]/g, "-$&").toLowerCase();
 
 const PassedProblem = ProblemJson.pick({
   type: true,
@@ -215,7 +244,42 @@ export function createApp(options: AppOptions): Service {
     return { body: result.data };
   }
 
+  const ownerCommandRoutes = Object.entries(ownerCommands).map(([name, payload]): Route => ({
+    method: "POST",
+    path: `/api/tasks/:id/${kebab(name)}`,
+    handler: async (request) => {
+      const commandId = idempotencyKey(request);
+      const { body } = await validate(request, {
+        params: TaskParams,
+        body: z
+          .looseObject({})
+          .transform((input) => ({ ...input, taskId: request.params.id }))
+          .pipe(payload),
+      });
+      const command = CommandEnvelopeV1(payload).parse({
+        commandId,
+        type: `orchestration.${name}`,
+        actor: { kind: "owner", id: subjectOf(request).sub },
+        payload: body,
+      });
+      const upstream = await call(
+        "orchestration",
+        new URL(`/internal/commands/${kebab(name)}`, options.orchestrationUrl),
+        request,
+        command,
+        { authorization: request.headers.authorization ?? "" },
+      );
+      if (upstream.status !== 200 && upstream.status !== 201) {
+        return problem(upstream, request, passedOwnerCommand);
+      }
+      const accepted = Accepted.safeParse(upstream.body);
+      if (!accepted.success || accepted.data.taskId !== body.taskId) throw badGateway();
+      return { status: 202, body: accepted.data };
+    },
+  }));
+
   const routes: Route[] = [
+    ...ownerCommandRoutes,
     {
       method: "POST",
       path: "/api/tasks",
