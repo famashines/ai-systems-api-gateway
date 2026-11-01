@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- `GET /api/tasks/:id` (`TaskDetailV1`), `GET /api/tasks/:id/output` and
+  `GET /api/tasks/:id/subtasks/:sid/output` (`TaskOutputV1`) from
+  projections (M3-07). A 404 from projections passes through. No
+  `Authorization` header goes to projections.
+
 - Contracts v0.4.1 (M3-10). `POST /api/conversations/:id/messages`
   passes the optional `mode` (`auto` or `approval`) to conversation-hub.
   On v0.3.0 the gateway dropped it. `taskId` together with `mode` gives 400. Deploy this and conversation-hub v0.4.1 before the app sends

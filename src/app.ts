@@ -10,7 +10,9 @@ import {
   ProblemJson,
   SetBudgetCommandPayloadV1,
   SubmitTaskCommandPayloadV1,
+  TaskDetailV1,
   TaskListResultV1,
+  TaskOutputV1,
   Timestamp,
 } from "@famashines/ai-systems-contracts";
 import { bearerHook, subjectOf, type JwtVerifier } from "@famashines/ai-systems-kit/auth";
@@ -55,6 +57,10 @@ const Posted = z.object({
 });
 
 const ConversationParams = z.object({ id: Id });
+
+const TaskParams = z.object({ id: Id });
+
+const SubtaskParams = z.object({ id: Id, sid: Id });
 
 const ListQuery = z.object({
   limit: z
@@ -242,6 +248,48 @@ export function createApp(options: AppOptions): Service {
       method: "GET",
       path: "/api/tasks",
       handler: (request) => list(request, "/internal/tasks", TaskListResultV1),
+    },
+    {
+      method: "GET",
+      path: "/api/tasks/:id",
+      handler: async (request) => {
+        const { params } = await validate(request, { params: TaskParams });
+        return list(
+          request,
+          `/internal/tasks/${params.id}`,
+          TaskDetailV1,
+          NoQuery,
+          passedWithNotFound,
+        );
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/tasks/:id/output",
+      handler: async (request) => {
+        const { params } = await validate(request, { params: TaskParams });
+        return list(
+          request,
+          `/internal/tasks/${params.id}/output`,
+          TaskOutputV1,
+          NoQuery,
+          passedWithNotFound,
+        );
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/tasks/:id/subtasks/:sid/output",
+      handler: async (request) => {
+        const { params } = await validate(request, { params: SubtaskParams });
+        return list(
+          request,
+          `/internal/tasks/${params.id}/subtasks/${params.sid}/output`,
+          TaskOutputV1,
+          NoQuery,
+          passedWithNotFound,
+        );
+      },
     },
     {
       method: "POST",

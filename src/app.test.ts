@@ -629,6 +629,104 @@ const posting = () => {
   return answers;
 };
 
+describe("GET /api/tasks/:id and the outputs", () => {
+  const taskId = "0b9d3c4e-6f1a-4c2b-9d8e-7a6b5c4d3e2f";
+  const runId = "1c8e2b3d-5a4f-4e6d-8c7b-9a0b1c2d3e4f";
+  const subtaskId = "2d7f1a2b-4c3e-4d5f-9b6a-8e7f6d5c4b3a";
+  const detail = {
+    taskId,
+    title: "Plan",
+    status: "running",
+    mode: "auto",
+    createdAt: "2026-10-31T09:15:00.000Z",
+    updatedAt: "2026-10-31T09:16:00.000Z",
+    runId,
+    currentCall: { callId: subtaskId, kind: "plan" },
+    subtasks: [],
+    checkpoints: [],
+    costMicroUsd: 10,
+    rev: 3,
+    asOf: 3,
+  };
+  const output = { taskId, runId, subtaskId, text: "Part" };
+  const notFound = (seen: Seen, response: ServerResponse) => {
+    json(
+      response,
+      404,
+      {
+        type: "about:blank",
+        title: "Not Found",
+        status: 404,
+        code: "not_found",
+        detail: "The task does not exist",
+        instance: seen.url,
+      },
+      "application/problem+json",
+    );
+  };
+
+  test("gives the detail and the outputs from projections, with no Authorization", async () => {
+    const call = await start();
+    projections.set((seen, response) => {
+      json(response, 200, seen.url.endsWith("/output") ? output : detail);
+    });
+    const response = await call(`/api/tasks/${taskId}?x=1`, { headers: await authed() });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), detail);
+    const part = await call(`/api/tasks/${taskId}/subtasks/${subtaskId}/output`, {
+      headers: await authed(),
+    });
+    assert.deepEqual(await part.json(), output);
+    const result = await call(`/api/tasks/${taskId}/output`, { headers: await authed() });
+    assert.equal(result.status, 200);
+    assert.deepEqual(
+      projections.seen.map((seen) => seen.url),
+      [
+        `/internal/tasks/${taskId}`,
+        `/internal/tasks/${taskId}/subtasks/${subtaskId}/output`,
+        `/internal/tasks/${taskId}/output`,
+      ],
+    );
+    for (const seen of projections.seen) assert.equal(seen.headers.authorization, undefined);
+  });
+
+  test("a bad id gives 400 and no token gives 401, with no upstream call", async () => {
+    const call = await start();
+    for (const path of [
+      "/api/tasks/x",
+      "/api/tasks/x/output",
+      `/api/tasks/${taskId}/subtasks/x/output`,
+    ]) {
+      assert.equal((await call(path, { headers: await authed() })).status, 400, path);
+    }
+    assert.equal((await call(`/api/tasks/${taskId}`)).status, 401);
+    assert.equal(projections.seen.length, 0);
+  });
+
+  test("404 from projections passes through; a bad answer gives 502", async () => {
+    const call = await start();
+    projections.set(notFound);
+    for (const path of [`/api/tasks/${taskId}`, `/api/tasks/${taskId}/output`]) {
+      const missing = await call(path, { headers: await authed() });
+      assert.equal(missing.status, 404);
+      const body = await problemOf(missing);
+      assert.equal(body.code, "not_found");
+      assert.equal(body.instance, path);
+    }
+    projections.set((_seen, response) => {
+      json(response, 200, { ...detail, currentCall: { callId: subtaskId, kind: "subtask" } });
+    });
+    assert.equal((await call(`/api/tasks/${taskId}`, { headers: await authed() })).status, 502);
+    projections.set((_seen, response) => {
+      json(response, 200, { taskId, runId });
+    });
+    assert.equal(
+      (await call(`/api/tasks/${taskId}/output`, { headers: await authed() })).status,
+      502,
+    );
+  });
+});
+
 describe("POST /api/conversations/:id/messages", () => {
   const conversationId = randomUUID();
   const path = `/api/conversations/${conversationId}/messages`;
