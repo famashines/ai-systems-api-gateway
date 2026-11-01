@@ -10,6 +10,7 @@ app --HTTPS /api--> Traefik --> api-gateway
                                   | rate limit for each subject: 429
                                   | zod checks: 400
                                   +--POST--> orchestration    /internal/commands/submit-task
+                                  +--POST--> orchestration    /internal/commands/<control> (with Authorization)
                                   +--POST--> conversation-hub /internal/commands/post-owner-message (with Authorization)
                                   +--POST--> budget           /internal/commands/set-budget (with Authorization)
                                   +--GET---> projections      /internal/tasks
@@ -26,6 +27,7 @@ app --HTTPS /api--> Traefik --> api-gateway
 | `GET /api/tasks/:id`                        | the task detail (below)                     |
 | `GET /api/tasks/:id/output`                 | the result of the run (below)               |
 | `GET /api/tasks/:id/subtasks/:sid/output`   | the output of a subtask (below)             |
+| `POST /api/tasks/:id/<control>`             | an owner control of a task (below)          |
 | `POST /api/conversations/:id/messages`      | post an owner message to a thread (below)   |
 | `GET /api/conversations/:id/messages`       | the messages of a thread (below)            |
 | `GET /api/budget?month=`                    | the budget of a month (below)               |
@@ -88,6 +90,63 @@ The same key again gives the same task: orchestration stores the
 `commandId` with its answer and replays it (200).
 
 `Location` is the URL of the task detail, `GET /api/tasks/<taskId>`.
+
+### `POST /api/tasks/:id/<control>`
+
+The owner controls of task M3-04. The path scheme: `<control>` is the
+orchestration command name in kebab case, and the same name is the path of
+the orchestration route.
+
+| Route                                    | Command             | Body (the payload with no `taskId`)    |
+| ---------------------------------------- | ------------------- | -------------------------------------- |
+| `POST /api/tasks/:id/approve-plan`       | `ApprovePlan`       | `{ planVersion }`                      |
+| `POST /api/tasks/:id/edit-plan`          | `EditPlan`          | `{ planVersion, subtasks }`            |
+| `POST /api/tasks/:id/reject-plan`        | `RejectPlan`        | `{ planVersion, reason }`              |
+| `POST /api/tasks/:id/pause-run`          | `PauseRun`          | `{}`                                   |
+| `POST /api/tasks/:id/resume-run`         | `ResumeRun`         | `{}`                                   |
+| `POST /api/tasks/:id/cancel-run`         | `CancelRun`         | `{ reason? }`                          |
+| `POST /api/tasks/:id/cancel-task`        | `CancelTask`        | `{ reason? }`                          |
+| `POST /api/tasks/:id/retry-subtask`      | `RetrySubtask`      | `{ subtaskId }`                        |
+| `POST /api/tasks/:id/reassign-subtask`   | `ReassignSubtask`   | `{ subtaskId, agentId, model? }`       |
+| `POST /api/tasks/:id/set-task-mode`      | `SetTaskMode`       | `{ mode }`                             |
+| `POST /api/tasks/:id/resolve-checkpoint` | `ResolveCheckpoint` | `{ checkpointId, decision, comment? }` |
+
+Request:
+
+- `:id` is the `taskId`: a lower-case UUID v4, else 400 with the path
+  `params.id`. A `taskId` in the body is replaced by `:id`.
+- Header `Idempotency-Key`: the same rule as `POST /api/tasks`.
+- Body: the fields of the command payload of contracts v0.4.1
+  (`ApprovePlanCommandPayloadV1` and the others), else 400 with no
+  upstream call.
+
+The gateway sends this `CommandEnvelopeV1` to
+`POST <ORCHESTRATION_URL>/internal/commands/<control>`, with the
+`Authorization` header of the request:
+
+```json
+{
+  "commandId": "<Idempotency-Key>",
+  "type": "orchestration.ApprovePlan",
+  "actor": { "kind": "owner", "id": "<sub of the token>" },
+  "payload": { "taskId": "<:id>", "planVersion": 2 }
+}
+```
+
+| Orchestration answer                                  | Gateway answer                                |
+| ----------------------------------------------------- | --------------------------------------------- |
+| 201 or 200 (replay) with `{ taskId, version }`        | 202, same body                                |
+| a body with another `taskId`                          | 502 `unavailable`                             |
+| problem JSON with 400, 403, 404, 409, 413, 415 or 422 | same status and problem (allowed fields only) |
+| 401 (the gateway already accepted the token)          | 502 `unavailable`                             |
+| other answers, size, timeout and network errors       | as for `POST /api/tasks`                      |
+
+Orchestration checks the owner token itself (ADR 0028) and gives 403 when
+`actor.id` is not the token `sub`, 404 for an unknown task, and 409
+`conflict` when the task state cannot take the command or `planVersion`
+is not the last version of the plan. The same key again gives the first
+answer (200 from orchestration, 202 here). The JWT check, the owner role,
+the rate limit and the problem rules are the same as on all routes.
 
 ### `GET /api/tasks`
 
@@ -162,7 +221,7 @@ a task of the thread. The same key again gives the same message.
   `BudgetMonthV1`. The answer is checked with zod; a bad answer is 502.
 - 404 `not_found` from projections (no cap is set and the month has no
   spend) passes through. The app shows "no cap set" for it. Only this
-  route and the task detail routes pass a 404.
+  route, the task detail routes and the owner controls pass a 404.
 
 ### `GET /api/tasks/:id` and the outputs
 
@@ -213,9 +272,10 @@ The gateway sends this `CommandEnvelopeV1` to
 Budget checks the owner token itself and refuses an `actor.id` that is not
 the token `sub`. So this route also sends the `Authorization` header of
 the request to the upstream. Only the routes to an upstream that checks
-the owner token send it: `POST /api/budget` and
-`POST /api/conversations/:id/messages`. All other routes send only
-`accept`, `content-type` and `x-correlation-id`. There are no routes to
+the owner token send it: `POST /api/budget`,
+`POST /api/conversations/:id/messages` and `POST /api/tasks/:id/<control>`.
+All other routes send only `accept`, `content-type` and `x-correlation-id`
+(also `POST /api/tasks` to orchestration and all routes to projections). There are no routes to
 the commands of prompt-studio and agent-manager yet. When they come, they
 must forward the header too (those services check the token, M2-17).
 
@@ -309,6 +369,9 @@ repo. A manual run (`workflow_dispatch`) works only on `main`.
   its size is the number of owner users (one).
 - The rate limit is for each pod. With two pods the real limit is double.
   Traefik has the limit for the whole Ingress (ARCHITECTURE 11.1).
+- On the cluster, the owner controls need `OIDC_JWKS_URL` on
+  orchestration and an egress from orchestration to Keycloak (gitops).
+  api-gateway can already connect to orchestration.
 - On the cluster, `POST /api/budget` needs a NetworkPolicy that lets
   api-gateway connect to budget on port 8080 (egress of api-gateway,
   ingress of budget). The policy is in `platform/gitops`.
