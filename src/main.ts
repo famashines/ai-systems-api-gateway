@@ -18,6 +18,7 @@ const app = createApp({
   conversationHubUrl: config.CONVERSATION_HUB_URL,
   projectionsUrl: config.PROJECTIONS_URL,
   budgetUrl: config.BUDGET_URL,
+  aiProxyUrl: config.AI_PROXY_URL,
   logger,
   metrics: telemetry.metricsHandler,
   closeHooks: [telemetry.shutdown],

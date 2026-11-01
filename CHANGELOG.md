@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+- Contracts v0.5.0. `POST /api/conversations/:id/messages` passes the
+  optional `model` and `effort` of a new task to conversation-hub. On
+  v0.4.1 the gateway dropped them. `taskId` together with `mode`, `model`
+  or `effort` gives 400 with the path `body.taskId` (was `body.mode` for
+  `mode`). `effort` with no `model` gives 400 with the path `body.effort`.
+  `GET /api/tasks/:id` keeps the new `model` and `effort` of
+  `TaskDetailV1`.
+
+- `GET /api/models` gives `ModelListResultV1` from
+  `GET <AI_PROXY_URL>/internal/models` of ai-proxy. A 503 or 400 problem
+  from ai-proxy passes through; a bad answer gives 502. No
+  `Authorization` header goes to ai-proxy. New env `AI_PROXY_URL`,
+  default `http://ai-systems-ai-proxy:8080`.
+
+- Deploy order (contracts CHANGELOG 0.5.0, step 3): deploy this version
+  after ai-proxy, orchestration, conversation-hub, projections and
+  audit-trace are on v0.5.0, and after the gitops NetworkPolicy from
+  api-gateway to ai-proxy.
+
 - `POST /api/tasks` forwards the `Authorization` header of the owner to
   orchestration, which checks the owner token on `submit-task` now (ADR
   0028, SubmitTask can start a paid plan call). A 403 from orchestration
