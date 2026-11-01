@@ -105,10 +105,13 @@ Request:
 - `:id` is the `conversationId`: a lower-case UUID v4, else 400 with the
   path `params.id`. The first message to a new id starts the thread.
 - Header `Idempotency-Key`: the same rule as `POST /api/tasks`.
-- Body: `{ text, taskId?, newTask? }`, the fields of
-  `PostOwnerMessageCommandPayloadV1` (contracts v0.3.0). `newTask` is
+- Body: `{ text, taskId?, newTask?, mode? }`, the fields of
+  `PostOwnerMessageCommandPayloadV1` (contracts v0.4.1). `newTask` is
   `false` by default. `taskId` together with `newTask: true` is refused
-  (400, path `body.taskId`). A `conversationId` in the body is replaced by
+  (400, path `body.taskId`). `mode` (`auto` or `approval`) is the mode of
+  a new task. `taskId` together with `mode` is refused (400, path
+  `body.mode`). conversation-hub copies `mode` into the event only for a
+  `new_task`. A `conversationId` in the body is replaced by
   `:id`.
 
 The gateway sends this `CommandEnvelopeV1` to
@@ -173,7 +176,7 @@ month view, because it changes that view.
 Request:
 
 - Header `Idempotency-Key`: the same rule as `POST /api/tasks`.
-- Body: `SetBudgetCommandPayloadV1` (contracts v0.3.0):
+- Body: `SetBudgetCommandPayloadV1` (contracts v0.4.1):
   `{ scope: { kind: "month" }, hardCapMicroUsd, softCapMicroUsd? }`,
   integer micro-USD, at most 1,000,000,000,000, the soft cap not above the
   hard cap. Else 400 with no upstream call.

@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Contracts v0.4.1 (M3-10). `POST /api/conversations/:id/messages`
+  passes the optional `mode` (`auto` or `approval`) to conversation-hub.
+  On v0.3.0 the gateway dropped it. `taskId` together with `mode` gives 400. Deploy this and conversation-hub v0.4.1 before the app sends
+  `mode` (contracts CHANGELOG 0.4.1, deploy order step 5).
+
 - `POST /api/conversations/:id/messages` forwards the `Authorization`
   header of the owner to conversation-hub, which checks the owner token
   now (M2-17, ADR 0028). A 403 from conversation-hub passes through. Only
