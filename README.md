@@ -23,6 +23,9 @@ app --HTTPS /api--> Traefik --> api-gateway
 | `GET /health`, `GET /ready`, `GET /metrics` | kit probes and Prometheus metrics, no token |
 | `POST /api/tasks`                           | submit a task (below)                       |
 | `GET /api/tasks?limit=&before=`             | the task list (below)                       |
+| `GET /api/tasks/:id`                        | the task detail (below)                     |
+| `GET /api/tasks/:id/output`                 | the result of the run (below)               |
+| `GET /api/tasks/:id/subtasks/:sid/output`   | the output of a subtask (below)             |
 | `POST /api/conversations/:id/messages`      | post an owner message to a thread (below)   |
 | `GET /api/conversations/:id/messages`       | the messages of a thread (below)            |
 | `GET /api/budget?month=`                    | the budget of a month (below)               |
@@ -84,9 +87,7 @@ client. The gateway logs the status of a refused answer at warn.
 The same key again gives the same task: orchestration stores the
 `commandId` with its answer and replays it (200).
 
-`Location` is the URL of the task for later. `GET /api/tasks/<taskId>`
-does not exist in M1 (it gives 404); use `GET /api/tasks` or the
-WebSocket topic.
+`Location` is the URL of the task detail, `GET /api/tasks/<taskId>`.
 
 ### `GET /api/tasks`
 
@@ -105,10 +106,11 @@ Request:
 - `:id` is the `conversationId`: a lower-case UUID v4, else 400 with the
   path `params.id`. The first message to a new id starts the thread.
 - Header `Idempotency-Key`: the same rule as `POST /api/tasks`.
-- Body: `{ text, taskId?, newTask? }`, the fields of
-  `PostOwnerMessageCommandPayloadV1` (contracts v0.3.0). `newTask` is
+- Body: `{ text, taskId?, newTask?, mode? }`, the fields of
+  `PostOwnerMessageCommandPayloadV1` (contracts v0.4.1). `newTask` is
   `false` by default. `taskId` together with `newTask: true` is refused
-  (400, path `body.taskId`). A `conversationId` in the body is replaced by
+  (400, path `body.taskId`), and `taskId` together with `mode` too (400,
+  path `body.mode`). A `conversationId` in the body is replaced by
   `:id`.
 
 The gateway sends this `CommandEnvelopeV1` to
@@ -158,7 +160,23 @@ a task of the thread. The same key again gives the same message.
   `BudgetMonthV1`. The answer is checked with zod; a bad answer is 502.
 - 404 `not_found` from projections (no cap is set and the month has no
   spend) passes through. The app shows "no cap set" for it. Only this
-  route passes a 404.
+  route and the task detail routes pass a 404.
+
+### `GET /api/tasks/:id` and the outputs
+
+- `:id` (the `taskId`) and `:sid` (the `subtaskId`) are lower-case UUID
+  v4, else 400 with no upstream call. No query; other query keys are
+  dropped.
+- Forwards to `GET <PROJECTIONS_URL>/internal/tasks/:id`,
+  `/internal/tasks/:id/output` or `/internal/tasks/:id/subtasks/:sid/output`
+  and gives `TaskDetailV1` or `TaskOutputV1`. The answer is checked with
+  zod; a bad answer is 502.
+- 404 `not_found` from projections (an unknown task, no result yet, or no
+  output of the subtask yet) passes through.
+- Read only: no `Authorization` header goes to projections.
+- The app subscribes `task:<id>` first and then reads the detail
+  (ARCHITECTURE 10.2). It reads an output again when a subtask becomes
+  `done` or the task `completed`.
 
 ### `GET /api/agents`
 
@@ -173,7 +191,7 @@ month view, because it changes that view.
 Request:
 
 - Header `Idempotency-Key`: the same rule as `POST /api/tasks`.
-- Body: `SetBudgetCommandPayloadV1` (contracts v0.3.0):
+- Body: `SetBudgetCommandPayloadV1` (contracts v0.4.1):
   `{ scope: { kind: "month" }, hardCapMicroUsd, softCapMicroUsd? }`,
   integer micro-USD, at most 1,000,000,000,000, the soft cap not above the
   hard cap. Else 400 with no upstream call.

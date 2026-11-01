@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Contracts v0.4.1. `POST /api/conversations/:id/messages` forwards the
+  optional `mode` of a new task, and refuses `mode` with a `taskId` (400).
+- `GET /api/tasks/:id` (`TaskDetailV1`), `GET /api/tasks/:id/output` and
+  `GET /api/tasks/:id/subtasks/:sid/output` (`TaskOutputV1`) from
+  projections (M3-07). A 404 from projections passes through. No
+  `Authorization` header goes to projections.
+
 - `POST /api/conversations/:id/messages` forwards the `Authorization`
   header of the owner to conversation-hub, which checks the owner token
   now (M2-17, ADR 0028). A 403 from conversation-hub passes through. Only
