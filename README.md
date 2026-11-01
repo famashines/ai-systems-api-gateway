@@ -9,7 +9,7 @@ app --HTTPS /api--> Traefik --> api-gateway
                                   | bearerHook (kit/auth): 401, 403
                                   | rate limit for each subject: 429
                                   | zod checks: 400
-                                  +--POST--> orchestration    /internal/commands/submit-task
+                                  +--POST--> orchestration    /internal/commands/submit-task (with Authorization)
                                   +--POST--> orchestration    /internal/commands/<control> (with Authorization)
                                   +--POST--> conversation-hub /internal/commands/post-owner-message (with Authorization)
                                   +--POST--> budget           /internal/commands/set-budget (with Authorization)
@@ -62,7 +62,9 @@ Request:
   `approval` by default), else 400. Body limit 256 KiB.
 
 The gateway sends this `CommandEnvelopeV1` to
-`POST <ORCHESTRATION_URL>/internal/commands/submit-task`:
+`POST <ORCHESTRATION_URL>/internal/commands/submit-task`, with the
+`Authorization` header of the request. Orchestration checks the owner
+token itself, because a task can start a paid plan call (ADR 0028):
 
 ```json
 {
@@ -73,13 +75,13 @@ The gateway sends this `CommandEnvelopeV1` to
 }
 ```
 
-| Orchestration answer                        | Gateway answer                                  |
-| ------------------------------------------- | ----------------------------------------------- |
-| 201 or 200 with `{ taskId, version }`       | 202, same body, `Location: /api/tasks/<taskId>` |
-| problem JSON with 400, 409, 413, 415 or 422 | same status and problem (allowed fields only)   |
-| other answer (also 401, 403, 500, 503)      | 502 `unavailable`, generic detail               |
-| answer larger than 1 MiB                    | 502 `unavailable`                               |
-| no answer in 5 s, or a network error        | 503 `unavailable`                               |
+| Orchestration answer                             | Gateway answer                                  |
+| ------------------------------------------------ | ----------------------------------------------- |
+| 201 or 200 with `{ taskId, version }`            | 202, same body, `Location: /api/tasks/<taskId>` |
+| problem JSON with 400, 403, 409, 413, 415 or 422 | same status and problem (allowed fields only)   |
+| other answer (also 401, 500, 503)                | 502 `unavailable`, generic detail               |
+| answer larger than 1 MiB                         | 502 `unavailable`                               |
+| no answer in 5 s, or a network error             | 503 `unavailable`                               |
 
 A problem that passes through keeps only `type`, `title`, `status`,
 `code`, `detail` and `errors`; `instance` is the gateway path. Other
@@ -273,9 +275,9 @@ Budget checks the owner token itself and refuses an `actor.id` that is not
 the token `sub`. So this route also sends the `Authorization` header of
 the request to the upstream. Only the routes to an upstream that checks
 the owner token send it: `POST /api/budget`,
-`POST /api/conversations/:id/messages` and `POST /api/tasks/:id/<control>`.
-All other routes send only `accept`, `content-type` and `x-correlation-id`
-(also `POST /api/tasks` to orchestration and all routes to projections). There are no routes to
+`POST /api/conversations/:id/messages`, `POST /api/tasks` and
+`POST /api/tasks/:id/<control>`. All other routes send only `accept`,
+`content-type` and `x-correlation-id` (all routes to projections). There are no routes to
 the commands of prompt-studio and agent-manager yet. When they come, they
 must forward the header too (those services check the token, M2-17).
 

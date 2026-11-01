@@ -297,8 +297,11 @@ export function createApp(options: AppOptions): Service {
           new URL("/internal/commands/submit-task", options.orchestrationUrl),
           request,
           command,
+          { authorization: request.headers.authorization ?? "" },
         );
-        if (upstream.status !== 200 && upstream.status !== 201) return problem(upstream, request);
+        if (upstream.status !== 200 && upstream.status !== 201) {
+          return problem(upstream, request, passedWithForbidden);
+        }
         const accepted = Accepted.safeParse(upstream.body);
         if (!accepted.success) throw badGateway();
         return {
