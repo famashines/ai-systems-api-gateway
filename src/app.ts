@@ -110,23 +110,10 @@ const ChatTitleReply = z.strictObject({
 
 export const titleTimeoutMs = 30_000;
 
-const ChatsQuery = z.object({
-  limit: z
-    .string()
-    .regex(/^(?:[1-9]\d?|100)$/)
-    .optional(),
-  before: Timestamp.optional(),
-  beforeId: Id.optional(),
-});
-
-const MessagesQuery = z.object({
+const MessagesQuery = ListQuery.pick({ limit: true }).extend({
   afterSeq: z
     .string()
     .regex(/^\d{1,6}$/)
-    .optional(),
-  limit: z
-    .string()
-    .regex(/^(?:[1-9]\d?|100)$/)
     .optional(),
 });
 
@@ -617,7 +604,7 @@ export function createApp(options: AppOptions): Service {
       method: "GET",
       path: "/api/chats",
       handler: async (request) => {
-        const { query } = await validate(request, { query: ChatsQuery });
+        const { query } = await validate(request, { query: ListQuery });
         return chats(request, "GET", "/internal/chats", ChatList, query);
       },
     },
