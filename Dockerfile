@@ -3,9 +3,10 @@ WORKDIR /app
 COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev --omit=optional && npm cache clean --force
 
-FROM node:26.13.0-slim@sha256:e4db4c914bf8ad241bd24804fc25d272d89bad97e68cdc8a1414862790a02c39
+FROM node:26.13.0-slim@sha256:5adad64f9a1fca2d51972caa65983634c8a774eb300d72b20f7f2a0f60368072
 WORKDIR /app
 ENV NODE_ENV=production
+RUN apt-get update && apt-get upgrade -y && rm -rf /var/lib/apt/lists/* /var/cache/apt/archives/*
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
