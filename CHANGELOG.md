@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `POST /api/chat/title`: forwards a title request with the owner token to
+  ai-proxy `POST /internal/chat/title` (docs ADR 0036) and checks the
+  answer `{ title, costMicroUsd }` with zod. Timeout 25 s.
+
 - `OWNER_WITHOUT_LOGIN` turns the login off for internal testing. When it
   is set, any bearer value is accepted and each request acts as the owner
   with this subject. Not set: no change.

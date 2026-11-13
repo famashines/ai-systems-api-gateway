@@ -36,6 +36,7 @@ app --HTTPS /api--> Traefik --> api-gateway
 | `GET /api/agents`                           | the agent list (below)                      |
 | `GET /api/models`                           | the model list (below)                      |
 | `POST /api/chat`                            | the direct chat, an event stream (below)    |
+| `POST /api/chat/title`                      | a short title for a direct chat (below)     |
 
 All other paths need a valid token too: with no valid token, an unknown
 path gives 401, not 404 (the hooks run before routing).
@@ -269,6 +270,18 @@ a task of the thread. The same key again gives the same message.
 - When the client closes the connection, the gateway closes the upstream
   call, so the model call stops.
 - No `Idempotency-Key`: the route stores nothing.
+
+### `POST /api/chat/title`
+
+- A short title for a direct chat, written by a model (docs ADR 0036).
+  The body is a JSON object; ai-proxy checks its fields (`chatId` and the
+  first user message, with the first answer as an option).
+- The gateway forwards it with the `Authorization` header of the owner to
+  `POST <AI_PROXY_URL>/internal/chat/title`, with a 25 s timeout.
+- The answer is `{ title, costMicroUsd }`, checked with zod: a title of 1
+  to 60 characters. Problem JSON with 400, 401, 403, 409, 413, 415, 422 or
+  503 from ai-proxy passes through. Other answers are 502, also the 404
+  of an ai-proxy without `TITLE_MODEL`. No answer in 25 s is 503.
 
 ### `GET /api/models`
 

@@ -223,6 +223,7 @@ describe("auth", () => {
         ["GET", "/api/budget"],
         ["GET", "/api/agents"],
         ["GET", "/api/models"],
+        ["POST", "/api/chat/title"],
         ["GET", "/api/unknown"],
         ["DELETE", "/nothing"],
       ] as const) {
@@ -1896,6 +1897,77 @@ describe("POST /api/chat", () => {
     const init = await post();
     assert.equal((await call("/api/chat", { ...init, headers: {} })).status, 401);
     assert.equal((await call("/api/chat", { ...init, body: "[]" })).status, 400);
+    assert.equal(aiProxy.seen.length, 0);
+  });
+});
+
+describe("POST /api/chat/title", () => {
+  const ask = {
+    chatId: "40000000-0000-4000-8000-000000000002",
+    messages: [{ role: "user", content: "Help me plan a trip" }],
+  };
+  const post = async (): Promise<RequestInit> => ({
+    method: "POST",
+    headers: await authed({ "content-type": "application/json" }),
+    body: JSON.stringify(ask),
+  });
+
+  test("gives the title of ai-proxy, with the owner token", async () => {
+    aiProxy.set((_seen, response) => {
+      json(response, 200, { title: "Trip plan", costMicroUsd: 12 });
+    });
+    const call = await start();
+    const init = await post();
+    const response = await call("/api/chat/title", init);
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { title: "Trip plan", costMicroUsd: 12 });
+    const sent = aiProxy.seen[0];
+    assert.ok(sent);
+    assert.equal(sent.method, "POST");
+    assert.equal(sent.url, "/internal/chat/title");
+    assert.deepEqual(sent.body, ask);
+    assert.equal(
+      sent.headers.authorization,
+      (init.headers as Record<string, string>).authorization,
+    );
+  });
+
+  test("a problem of ai-proxy passes through; other answers give 502 or 503", async () => {
+    const call = await start();
+    for (const [status, code] of [
+      [400, "validation_failed"],
+      [401, "unauthorized"],
+      [403, "forbidden"],
+      [503, "unavailable"],
+    ] as const) {
+      aiProxy.set((_seen, response) => {
+        json(
+          response,
+          status,
+          { type: "about:blank", title: "No", status, code, detail: "No" },
+          "application/problem+json",
+        );
+      });
+      const passed = await call("/api/chat/title", await post());
+      assert.equal(passed.status, status);
+      assert.equal((await problemOf(passed)).instance, "/api/chat/title");
+    }
+    for (const body of [{ title: "" }, { title: "x".repeat(61), costMicroUsd: 1 }, { ok: true }]) {
+      aiProxy.set((_seen, response) => {
+        json(response, 200, body);
+      });
+      assert.equal((await call("/api/chat/title", await post())).status, 502);
+    }
+    aiProxy.set((_seen, response) => {
+      json(response, 404, { type: "about:blank", title: "No", status: 404, code: "not_found" });
+    });
+    assert.equal((await call("/api/chat/title", await post())).status, 502);
+  });
+
+  test("needs a JSON object", async () => {
+    const call = await start();
+    const init = await post();
+    assert.equal((await call("/api/chat/title", { ...init, body: "[]" })).status, 400);
     assert.equal(aiProxy.seen.length, 0);
   });
 });

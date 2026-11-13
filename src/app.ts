@@ -102,6 +102,13 @@ const passedChat = new Set([...passedWithForbidden, 401, 503]);
 
 const ChatBody = z.looseObject({});
 
+const ChatTitleReply = z.strictObject({
+  title: z.string().min(1).max(60),
+  costMicroUsd: z.int().nonnegative(),
+});
+
+export const titleTimeoutMs = 25_000;
+
 const ownerCommands = {
   ApprovePlan: ApprovePlanCommandPayloadV1,
   EditPlan: EditPlanCommandPayloadV1,
@@ -174,6 +181,7 @@ export function createApp(options: AppOptions): Service {
     request: Request,
     body?: unknown,
     extra: Record<string, string> = {},
+    timeoutMs = upstreamTimeoutMs,
   ): Promise<Upstream> {
     let status: number;
     let text: string | undefined;
@@ -188,7 +196,7 @@ export function createApp(options: AppOptions): Service {
         },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
         redirect: "error",
-        signal: AbortSignal.timeout(upstreamTimeoutMs),
+        signal: AbortSignal.timeout(timeoutMs),
       });
       status = response.status;
       text = await readLimited(response);
@@ -494,6 +502,25 @@ export function createApp(options: AppOptions): Service {
           });
         if (text === undefined) throw badGateway();
         return problem({ status: response.status, body: parseJson(text) }, request, passedChat);
+      },
+    },
+    {
+      method: "POST",
+      path: "/api/chat/title",
+      handler: async (request) => {
+        const { body } = await validate(request, { body: ChatBody });
+        const upstream = await call(
+          "ai-proxy",
+          new URL("/internal/chat/title", options.aiProxyUrl),
+          request,
+          body,
+          { authorization: request.headers.authorization ?? "" },
+          titleTimeoutMs,
+        );
+        if (upstream.status !== 200) return problem(upstream, request, passedChat);
+        const reply = ChatTitleReply.safeParse(upstream.body);
+        if (!reply.success) throw badGateway();
+        return { body: reply.data };
       },
     },
     {
