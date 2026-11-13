@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- `OWNER_WITHOUT_LOGIN` turns the login off for internal testing. When it
+  is set, any bearer value is accepted and each request acts as the owner
+  with this subject. Not set: no change.
+
 - `POST /api/chat`: the direct chat (docs ADR 0034). The gateway checks
   the owner token and the rate limit, then passes the JSON body and the
   `Authorization` header to `POST <AI_PROXY_URL>/internal/chat` and passes

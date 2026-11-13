@@ -22,7 +22,7 @@ import {
 import { exportJWK, generateKeyPair, SignJWT, type CryptoKey } from "jose";
 import { z } from "zod";
 import { createApp, type AppOptions } from "./app.ts";
-import { Env, verifierOptions } from "./env.ts";
+import { Env, ownerVerifier, verifierOptions } from "./env.ts";
 
 const issuer = "https://auth.example.test/realms/ai-systems";
 const logger = createLogger({ service: "test", release: "test", level: "silent" });
@@ -1760,6 +1760,30 @@ describe("env", () => {
       loadConfig(Env, { ORCHESTRATION_URL: "file:///etc/passwd", PROJECTIONS_URL: "x" }),
     );
     assert.throws(() => loadConfig(Env, {}));
+  });
+
+  test("OWNER_WITHOUT_LOGIN turns the login off and each request acts as that owner", async () => {
+    const upstreams = {
+      ORCHESTRATION_URL: "http://ai-systems-orchestration:8080",
+      PROJECTIONS_URL: "http://ai-systems-projections:8080",
+    };
+    assert.equal(loadConfig(Env, upstreams).OWNER_WITHOUT_LOGIN, undefined);
+    await assert.rejects(ownerVerifier(loadConfig(Env, upstreams), logger)("no-login"));
+    const verify = ownerVerifier(
+      loadConfig(Env, { ...upstreams, OWNER_WITHOUT_LOGIN: "owner-1" }),
+      logger,
+    );
+    assert.deepEqual(await verify("no-login"), {
+      sub: "owner-1",
+      roles: ["owner"],
+      exp: Number.MAX_SAFE_INTEGER,
+    });
+    const call = await start({ verify });
+    assert.notEqual(
+      (await call("/api/budget", { headers: { authorization: "Bearer no-login" } })).status,
+      401,
+    );
+    assert.equal((await call("/api/budget")).status, 401);
   });
 
   test("OIDC_JWKS_URL is the key source, the issuer check stays", async () => {
