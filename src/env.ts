@@ -1,4 +1,8 @@
-import type { JwtVerifierOptions } from "@famashines/ai-systems-kit/auth";
+import {
+  createJwtVerifier,
+  type JwtVerifier,
+  type JwtVerifierOptions,
+} from "@famashines/ai-systems-kit/auth";
 import { commonEnv } from "@famashines/ai-systems-kit/config";
 import { z } from "zod";
 
@@ -15,6 +19,7 @@ export const Env = commonEnv.extend({
   OIDC_JWKS_URL: httpUrl.optional(),
   OIDC_AUDIENCE: z.string().min(1).default("ai-systems-app"),
   REQUIRED_ROLE: z.string().min(1).default("owner"),
+  OWNER_WITHOUT_LOGIN: z.string().min(1).optional(),
 });
 
 export const verifierOptions = (config: z.output<typeof Env>): JwtVerifierOptions => ({
@@ -23,3 +28,14 @@ export const verifierOptions = (config: z.output<typeof Env>): JwtVerifierOption
   requiredRole: config.REQUIRED_ROLE,
   ...(config.OIDC_JWKS_URL === undefined ? {} : { jwksUrl: config.OIDC_JWKS_URL }),
 });
+
+export const ownerVerifier = (
+  config: z.output<typeof Env>,
+  logger: NonNullable<JwtVerifierOptions["logger"]>,
+): JwtVerifier => {
+  const sub = config.OWNER_WITHOUT_LOGIN;
+  if (sub === undefined) return createJwtVerifier({ ...verifierOptions(config), logger });
+  logger.warn({ sub }, "login is off: each request acts as the owner");
+  return () =>
+    Promise.resolve({ sub, roles: [config.REQUIRED_ROLE], exp: Number.MAX_SAFE_INTEGER });
+};

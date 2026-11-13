@@ -347,6 +347,11 @@ services as `x-correlation-id`. OpenTelemetry sends `traceparent`.
 Read once at start with zod (kit/config); a bad value stops the process.
 `.env.example` has the names, with no values.
 
+`OWNER_WITHOUT_LOGIN` turns the login off for internal testing. When it is
+set, the gateway accepts any bearer value and each request acts as the
+owner with this subject. Anyone who can reach the gateway can then chat and
+spend credits up to the budget cap. Remove it to turn the login on again.
+
 | Variable                                                            | Default                                             |
 | ------------------------------------------------------------------- | --------------------------------------------------- |
 | `ORCHESTRATION_URL`                                                 | required, `http` or `https` origin                  |
@@ -358,6 +363,7 @@ Read once at start with zod (kit/config); a bad value stops the process.
 | `OIDC_JWKS_URL`                                                     | none: `<OIDC_ISSUER>/protocol/openid-connect/certs` |
 | `OIDC_AUDIENCE`                                                     | `ai-systems-app`                                    |
 | `REQUIRED_ROLE`                                                     | `owner`                                             |
+| `OWNER_WITHOUT_LOGIN`                                               | none: login on. Set: login off (see below)          |
 | `PORT`                                                              | `8080`                                              |
 | `LOG_LEVEL`                                                         | `info`                                              |
 | `RELEASE`                                                           | `local`                                             |
