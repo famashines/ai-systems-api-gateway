@@ -277,11 +277,12 @@ a task of the thread. The same key again gives the same message.
   The body is a JSON object; ai-proxy checks its fields (`chatId` and the
   first user message, with the first answer as an option).
 - The gateway forwards it with the `Authorization` header of the owner to
-  `POST <AI_PROXY_URL>/internal/chat/title`, with a 25 s timeout.
+  `POST <AI_PROXY_URL>/internal/chat/title`, with a 30 s timeout. ai-proxy
+  needs up to about 25 s: catalog, budget, a 15 s model call, settle.
 - The answer is `{ title, costMicroUsd }`, checked with zod: a title of 1
   to 60 characters. Problem JSON with 400, 401, 403, 409, 413, 415, 422 or
   503 from ai-proxy passes through. Other answers are 502, also the 404
-  of an ai-proxy without `TITLE_MODEL`. No answer in 25 s is 503.
+  of an ai-proxy without `TITLE_MODEL`. No answer in 30 s is 503.
 
 ### `GET /api/models`
 

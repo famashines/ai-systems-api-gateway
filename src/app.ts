@@ -107,7 +107,7 @@ const ChatTitleReply = z.strictObject({
   costMicroUsd: z.int().nonnegative(),
 });
 
-export const titleTimeoutMs = 25_000;
+export const titleTimeoutMs = 30_000;
 
 const ownerCommands = {
   ApprovePlan: ApprovePlanCommandPayloadV1,
