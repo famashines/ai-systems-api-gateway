@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Chat history routes (docs ADR 0037): `GET /api/chats`,
+  `GET /api/chats/:id/messages`, `PATCH /api/chats/:id` and
+  `DELETE /api/chats/:id` forward with the owner token to ai-proxy
+  `/internal/chats`. The list and page answers are checked with zod.
+
 - `POST /api/chat/title`: forwards a title request with the owner token to
   ai-proxy `POST /internal/chat/title` (docs ADR 0036) and checks the
   answer `{ title, costMicroUsd }` with zod. Timeout 30 s.

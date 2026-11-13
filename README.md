@@ -37,6 +37,10 @@ app --HTTPS /api--> Traefik --> api-gateway
 | `GET /api/models`                           | the model list (below)                      |
 | `POST /api/chat`                            | the direct chat, an event stream (below)    |
 | `POST /api/chat/title`                      | a short title for a direct chat (below)     |
+| `GET /api/chats`                            | the saved chats, newest first (below)       |
+| `GET /api/chats/:id/messages`               | a page of the messages of one chat          |
+| `PATCH /api/chats/:id`                      | rename or bookmark a chat                   |
+| `DELETE /api/chats/:id`                     | delete a chat and its messages              |
 
 All other paths need a valid token too: with no valid token, an unknown
 path gives 401, not 404 (the hooks run before routing).
@@ -283,6 +287,21 @@ a task of the thread. The same key again gives the same message.
   to 60 characters. Problem JSON with 400, 401, 403, 409, 413, 415, 422 or
   503 from ai-proxy passes through. Other answers are 502, also the 404
   of an ai-proxy without `TITLE_MODEL`. No answer in 30 s is 503.
+
+### Chat history: `/api/chats`
+
+- The chats that ai-proxy saved (docs ADR 0037). The gateway forwards
+  each request with the `Authorization` header of the owner to the same
+  path under `<AI_PROXY_URL>/internal/chats`, with the normal timeout.
+- `GET /api/chats?limit=&before=&beforeId=`: `limit` 1 to 100, `before`
+  an ISO timestamp, `beforeId` a chat id. The answer `{ items }` is
+  checked with zod.
+- `GET /api/chats/:id/messages?afterSeq=&limit=`: oldest first. The
+  answer `{ items, more }` is checked with zod.
+- `PATCH /api/chats/:id`: a JSON object, checked by ai-proxy (`title`,
+  `bookmarked`). `DELETE /api/chats/:id`. Both give 204.
+- Problem JSON with 400, 401, 403, 404, 409, 413, 415, 422 or 503 from
+  ai-proxy passes through. Other answers are 502.
 
 ### `GET /api/models`
 
