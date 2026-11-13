@@ -475,19 +475,23 @@ export function createApp(options: AppOptions): Service {
             signal: AbortSignal.any([abort.signal, request.signal]),
           });
         } catch (error) {
+          clearTimeout(timer);
           logger.warn({ err: error, upstream: "ai-proxy" }, "the upstream call failed");
           throw new UnavailableError("The ai-proxy service is not available");
-        } finally {
-          clearTimeout(timer);
         }
         const type = response.headers.get("content-type") ?? "";
         if (response.status === 200 && response.body && type.startsWith("text/event-stream")) {
+          clearTimeout(timer);
           return {
             headers: { "content-type": "text/event-stream", "x-accel-buffering": "no" },
             body: response.body,
           };
         }
-        const text = await readLimited(response).catch(() => undefined);
+        const text = await readLimited(response)
+          .catch(() => undefined)
+          .finally(() => {
+            clearTimeout(timer);
+          });
         if (text === undefined) throw badGateway();
         return problem({ status: response.status, body: parseJson(text) }, request, passedChat);
       },
