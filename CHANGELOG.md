@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- `POST /api/chat`: the direct chat (docs ADR 0034). The gateway checks
+  the owner token and the rate limit, then passes the JSON body and the
+  `Authorization` header to `POST <AI_PROXY_URL>/internal/chat` and passes
+  the server-sent event stream back. A client that goes away closes the
+  upstream call. Kit v0.4.0 (streamed replies, `request.signal`).
+
 - Contracts v0.5.0. `POST /api/conversations/:id/messages` passes the
   optional `model` and `effort` of a new task to conversation-hub. On
   v0.4.1 the gateway dropped them. `taskId` together with `mode`, `model`

@@ -35,6 +35,7 @@ app --HTTPS /api--> Traefik --> api-gateway
 | `POST /api/budget`                          | set the monthly cap (below)                 |
 | `GET /api/agents`                           | the agent list (below)                      |
 | `GET /api/models`                           | the model list (below)                      |
+| `POST /api/chat`                            | the direct chat, an event stream (below)    |
 
 All other paths need a valid token too: with no valid token, an unknown
 path gives 401, not 404 (the hooks run before routing).
@@ -250,6 +251,24 @@ a task of the thread. The same key again gives the same message.
 
 - No query. Forwards to `GET <PROJECTIONS_URL>/internal/agents` and gives
   `AgentListResultV1`. A 404 or a bad answer is 502.
+
+### `POST /api/chat`
+
+- The direct chat (docs ADR 0034): one model answer for the messages of a
+  chat, with no system message, no agent and no task.
+- The body is a JSON object of at most 256 KiB. The gateway does not check
+  its fields; ai-proxy does. The gateway forwards it with the
+  `Authorization` header of the owner to
+  `POST <AI_PROXY_URL>/internal/chat`, because ai-proxy checks the owner
+  token again before it spends money (ADR 0028).
+- The answer is `text/event-stream`, passed on piece by piece: `delta`
+  events with text, then one `done` or `error` event. ai-proxy README has
+  the event fields.
+- Problem JSON with 400, 401, 403, 409, 413, 415, 422 or 503 from ai-proxy
+  passes through. No answer head in 5 s is 503. Other answers are 502.
+- When the client closes the connection, the gateway closes the upstream
+  call, so the model call stops.
+- No `Idempotency-Key`: the route stores nothing.
 
 ### `GET /api/models`
 

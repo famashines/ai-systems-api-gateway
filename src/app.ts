@@ -98,6 +98,10 @@ const passedWithUnavailable = new Set([...passedStatuses, 503]);
 
 const passedOwnerCommand = new Set([...passedWithForbidden, 404]);
 
+const passedChat = new Set([...passedWithForbidden, 401, 503]);
+
+const ChatBody = z.looseObject({});
+
 const ownerCommands = {
   ApprovePlan: ApprovePlanCommandPayloadV1,
   EditPlan: EditPlanCommandPayloadV1,
@@ -446,6 +450,47 @@ export function createApp(options: AppOptions): Service {
       method: "GET",
       path: "/api/agents",
       handler: (request) => list(request, "/internal/agents", AgentListResultV1, NoQuery),
+    },
+    {
+      method: "POST",
+      path: "/api/chat",
+      handler: async (request) => {
+        const { body } = await validate(request, { body: ChatBody });
+        const abort = new AbortController();
+        const timer = setTimeout(() => {
+          abort.abort();
+        }, upstreamTimeoutMs);
+        let response: Response;
+        try {
+          response = await fetch(new URL("/internal/chat", options.aiProxyUrl), {
+            method: "POST",
+            headers: {
+              accept: "text/event-stream",
+              "content-type": "application/json",
+              "x-correlation-id": request.correlationId,
+              authorization: request.headers.authorization ?? "",
+            },
+            body: JSON.stringify(body),
+            redirect: "error",
+            signal: AbortSignal.any([abort.signal, request.signal]),
+          });
+        } catch (error) {
+          logger.warn({ err: error, upstream: "ai-proxy" }, "the upstream call failed");
+          throw new UnavailableError("The ai-proxy service is not available");
+        } finally {
+          clearTimeout(timer);
+        }
+        const type = response.headers.get("content-type") ?? "";
+        if (response.status === 200 && response.body && type.startsWith("text/event-stream")) {
+          return {
+            headers: { "content-type": "text/event-stream", "x-accel-buffering": "no" },
+            body: response.body,
+          };
+        }
+        const text = await readLimited(response).catch(() => undefined);
+        if (text === undefined) throw badGateway();
+        return problem({ status: response.status, body: parseJson(text) }, request, passedChat);
+      },
     },
     {
       method: "GET",
