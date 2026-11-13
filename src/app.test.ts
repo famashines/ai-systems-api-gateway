@@ -1780,3 +1780,98 @@ describe("env", () => {
     assert.throws(() => loadConfig(Env, { ...upstreams, OIDC_JWKS_URL: "file:///etc/passwd" }));
   });
 });
+
+describe("POST /api/chat", () => {
+  const chat = {
+    chatId: "40000000-0000-4000-8000-000000000001",
+    model: "openai/gpt-4.1-nano",
+    messages: [{ role: "user", content: "Hello" }],
+  };
+  const post = async (): Promise<RequestInit> => ({
+    method: "POST",
+    headers: await authed({ "content-type": "application/json" }),
+    body: JSON.stringify(chat),
+  });
+
+  test("passes the event stream of ai-proxy on, with the owner token", async () => {
+    aiProxy.set((_seen, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write('data: {"type":"delta","text":"Hi"}\n\n');
+      setTimeout(() => response.end('data: {"type":"done"}\n\n'), 20);
+    });
+    const call = await start();
+    const init = await post();
+    const response = await call("/api/chat", init);
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/event-stream");
+    assert.equal(
+      await response.text(),
+      'data: {"type":"delta","text":"Hi"}\n\ndata: {"type":"done"}\n\n',
+    );
+    const sent = aiProxy.seen[0];
+    assert.ok(sent);
+    assert.equal(sent.method, "POST");
+    assert.equal(sent.url, "/internal/chat");
+    assert.deepEqual(sent.body, chat);
+    assert.equal(
+      sent.headers.authorization,
+      (init.headers as Record<string, string>).authorization,
+    );
+  });
+
+  test("a client that goes away closes the stream of ai-proxy", async () => {
+    const state = { closed: false };
+    aiProxy.set((_seen, response) => {
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write(": ping\n\n");
+      response.once("close", () => {
+        state.closed = true;
+      });
+    });
+    const call = await start();
+    const abort = new AbortController();
+    const response = await call("/api/chat", { ...(await post()), signal: abort.signal });
+    await response.body?.getReader().read();
+    abort.abort();
+    for (let tries = 0; !state.closed && tries < 100; tries += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.ok(state.closed);
+  });
+
+  test("a problem of ai-proxy passes through; other answers give 502 or 503", async () => {
+    const call = await start({ upstreamTimeoutMs: 100 });
+    for (const [status, code] of [
+      [400, "validation_failed"],
+      [401, "unauthorized"],
+      [403, "forbidden"],
+      [503, "unavailable"],
+    ] as const) {
+      aiProxy.set((_seen, response) => {
+        json(
+          response,
+          status,
+          { type: "about:blank", title: "No", status, code, detail: "No" },
+          "application/problem+json",
+        );
+      });
+      const passed = await call("/api/chat", await post());
+      assert.equal(passed.status, status);
+      assert.equal((await problemOf(passed)).instance, "/api/chat");
+    }
+    aiProxy.set((_seen, response) => {
+      json(response, 200, { ok: true });
+    });
+    assert.equal((await call("/api/chat", await post())).status, 502);
+    aiProxy.set(() => undefined);
+    assert.equal((await call("/api/chat", await post())).status, 503);
+  });
+
+  test("needs a token and a JSON object", async () => {
+    const call = await start();
+    const init = await post();
+    assert.equal((await call("/api/chat", { ...init, headers: {} })).status, 401);
+    assert.equal((await call("/api/chat", { ...init, body: "[]" })).status, 400);
+    assert.equal(aiProxy.seen.length, 0);
+  });
+});
