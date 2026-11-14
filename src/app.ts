@@ -14,6 +14,7 @@ import {
   PauseRunCommandPayloadV1,
   PostOwnerMessageCommandPayloadV1,
   ProblemJson,
+  ReasoningEffort,
   ReassignSubtaskCommandPayloadV1,
   RejectPlanCommandPayloadV1,
   ResolveCheckpointCommandPayloadV1,
@@ -109,6 +110,50 @@ const ChatTitleReply = z.strictObject({
 
 export const titleTimeoutMs = 30_000;
 
+const MessagesQuery = ListQuery.pick({ limit: true }).extend({
+  afterSeq: z
+    .string()
+    .regex(/^\d{1,6}$/)
+    .optional(),
+});
+
+const ChatParams = z.object({ id: Id });
+
+const ChatList = z.strictObject({
+  items: z
+    .array(
+      z.strictObject({
+        chatId: Id,
+        title: z.string().min(1).max(80).exactOptional(),
+        titled: z.enum(["model", "owner"]).exactOptional(),
+        bookmarked: z.boolean(),
+        createdAt: Timestamp,
+        updatedAt: Timestamp,
+      }),
+    )
+    .max(100),
+});
+
+const ChatPage = z.strictObject({
+  items: z
+    .array(
+      z.strictObject({
+        seq: z.int().min(0),
+        role: z.enum(["user", "assistant"]),
+        text: z.string(),
+        state: z.enum(["done", "stopped"]).exactOptional(),
+        model: z.string().exactOptional(),
+        effort: ReasoningEffort.exactOptional(),
+        costMicroUsd: z.int().nonnegative().exactOptional(),
+        createdAt: Timestamp,
+      }),
+    )
+    .max(100),
+  more: z.boolean(),
+});
+
+const passedChatHistory = new Set([...passedChat, 404]);
+
 const ownerCommands = {
   ApprovePlan: ApprovePlanCommandPayloadV1,
   EditPlan: EditPlanCommandPayloadV1,
@@ -182,12 +227,13 @@ export function createApp(options: AppOptions): Service {
     body?: unknown,
     extra: Record<string, string> = {},
     timeoutMs = upstreamTimeoutMs,
+    method = body === undefined ? "GET" : "POST",
   ): Promise<Upstream> {
     let status: number;
     let text: string | undefined;
     try {
       const response = await fetch(url, {
-        method: body === undefined ? "GET" : "POST",
+        method,
         headers: {
           accept: "application/json",
           "x-correlation-id": request.correlationId,
@@ -255,6 +301,37 @@ export function createApp(options: AppOptions): Service {
     }
     const upstream = await call("projections", url, request);
     if (upstream.status !== 200) return problem(upstream, request, passed);
+    const result = schema.safeParse(upstream.body);
+    if (!result.success) throw badGateway();
+    return { body: result.data };
+  }
+
+  async function chats<T>(
+    request: Request,
+    method: "GET" | "PATCH" | "DELETE",
+    path: string,
+    schema?: z.ZodType<T>,
+    query: Record<string, string | undefined> = {},
+    body?: unknown,
+  ): Promise<Reply> {
+    const url = new URL(path, options.aiProxyUrl);
+    for (const [name, value] of Object.entries(query)) {
+      if (value !== undefined) url.searchParams.set(name, value);
+    }
+    const upstream = await call(
+      "ai-proxy",
+      url,
+      request,
+      body,
+      { authorization: request.headers.authorization ?? "" },
+      upstreamTimeoutMs,
+      method,
+    );
+    if (!schema) {
+      if (upstream.status !== 204) return problem(upstream, request, passedChatHistory);
+      return { status: 204 };
+    }
+    if (upstream.status !== 200) return problem(upstream, request, passedChatHistory);
     const result = schema.safeParse(upstream.body);
     if (!result.success) throw badGateway();
     return { body: result.data };
@@ -521,6 +598,45 @@ export function createApp(options: AppOptions): Service {
         const reply = ChatTitleReply.safeParse(upstream.body);
         if (!reply.success) throw badGateway();
         return { body: reply.data };
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/chats",
+      handler: async (request) => {
+        const { query } = await validate(request, { query: ListQuery });
+        return chats(request, "GET", "/internal/chats", ChatList, query);
+      },
+    },
+    {
+      method: "GET",
+      path: "/api/chats/:id/messages",
+      handler: async (request) => {
+        const { params, query } = await validate(request, {
+          params: ChatParams,
+          query: MessagesQuery,
+        });
+        return chats(request, "GET", `/internal/chats/${params.id}/messages`, ChatPage, query);
+      },
+    },
+    {
+      method: "PATCH",
+      path: "/api/chats/:id",
+      handler: async (request) => {
+        const { params, body } = await validate(request, {
+          params: ChatParams,
+          query: NoQuery,
+          body: ChatBody,
+        });
+        return chats(request, "PATCH", `/internal/chats/${params.id}`, undefined, {}, body);
+      },
+    },
+    {
+      method: "DELETE",
+      path: "/api/chats/:id",
+      handler: async (request) => {
+        const { params } = await validate(request, { params: ChatParams, query: NoQuery });
+        return chats(request, "DELETE", `/internal/chats/${params.id}`);
       },
     },
     {

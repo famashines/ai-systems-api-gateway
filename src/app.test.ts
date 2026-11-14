@@ -224,6 +224,8 @@ describe("auth", () => {
         ["GET", "/api/agents"],
         ["GET", "/api/models"],
         ["POST", "/api/chat/title"],
+        ["GET", "/api/chats"],
+        ["DELETE", `/api/chats/${randomUUID()}`],
         ["GET", "/api/unknown"],
         ["DELETE", "/nothing"],
       ] as const) {
@@ -1969,5 +1971,118 @@ describe("POST /api/chat/title", () => {
     const init = await post();
     assert.equal((await call("/api/chat/title", { ...init, body: "[]" })).status, 400);
     assert.equal(aiProxy.seen.length, 0);
+  });
+});
+
+describe("chat history routes", () => {
+  const chatId = "40000000-0000-4000-8000-000000000003";
+  const summary = {
+    chatId,
+    title: "Trip",
+    titled: "model",
+    bookmarked: false,
+    createdAt: "2026-11-14T10:00:00.000Z",
+    updatedAt: "2026-11-14T10:00:00.000Z",
+  };
+  const message = {
+    seq: 1,
+    role: "assistant",
+    text: "Hello",
+    state: "done",
+    model: "mock/small",
+    effort: "high",
+    costMicroUsd: 5,
+    createdAt: "2026-11-14T10:00:00.000Z",
+  };
+
+  test("forward the list, the pages, a change and a delete with the owner token", async () => {
+    aiProxy.set((seen, response) => {
+      if (seen.url.startsWith("/internal/chats?")) json(response, 200, { items: [summary] });
+      else if (seen.url.includes("/messages")) {
+        json(response, 200, { items: [message], more: true });
+      } else response.writeHead(204).end();
+    });
+    const call = await start();
+    const headers = await authed();
+    const list = await call("/api/chats?limit=20&beforeId=" + chatId, { headers });
+    assert.equal(list.status, 200);
+    assert.deepEqual(await list.json(), { items: [summary] });
+    const page = await call(`/api/chats/${chatId}/messages?afterSeq=0`, { headers });
+    assert.deepEqual(await page.json(), { items: [message], more: true });
+    const patched = await call(`/api/chats/${chatId}`, {
+      method: "PATCH",
+      headers: await authed({ "content-type": "application/json" }),
+      body: JSON.stringify({ bookmarked: true }),
+    });
+    assert.equal(patched.status, 204);
+    const removed = await call(`/api/chats/${chatId}`, { method: "DELETE", headers });
+    assert.equal(removed.status, 204);
+    assert.deepEqual(
+      aiProxy.seen.map((seen) => [seen.method, seen.url, seen.body]),
+      [
+        ["GET", `/internal/chats?limit=20&beforeId=${chatId}`, undefined],
+        ["GET", `/internal/chats/${chatId}/messages?afterSeq=0`, undefined],
+        ["PATCH", `/internal/chats/${chatId}`, { bookmarked: true }],
+        ["DELETE", `/internal/chats/${chatId}`, undefined],
+      ],
+    );
+    for (const seen of aiProxy.seen) {
+      assert.equal(seen.headers.authorization, headers.authorization);
+    }
+  });
+
+  test("a bad query or id gives 400 with no upstream call", async () => {
+    const call = await start();
+    const headers = await authed();
+    for (const path of [
+      "/api/chats?limit=0",
+      "/api/chats?limit=101",
+      "/api/chats?before=yesterday",
+      `/api/chats/${chatId}/messages?afterSeq=-1`,
+      "/api/chats/not-an-id/messages",
+    ]) {
+      assert.equal((await call(path, { headers })).status, 400, path);
+    }
+    assert.equal(aiProxy.seen.length, 0);
+  });
+
+  test("a problem of ai-proxy passes through; a bad answer gives 502", async () => {
+    const call = await start();
+    const headers = await authed();
+    for (const [status, code] of [
+      [401, "unauthorized"],
+      [404, "not_found"],
+      [503, "unavailable"],
+    ] as const) {
+      aiProxy.set((_seen, response) => {
+        json(
+          response,
+          status,
+          { type: "about:blank", title: "No", status, code, detail: "No" },
+          "application/problem+json",
+        );
+      });
+      const passed = await call(`/api/chats/${chatId}`, { method: "DELETE", headers });
+      assert.equal(passed.status, status);
+      assert.equal((await problemOf(passed)).instance, `/api/chats/${chatId}`);
+    }
+    for (const body of [
+      { items: [{ ...summary, title: "" }] },
+      { items: [{ ...summary, extra: 1 }] },
+      { items: [], more: "yes" },
+    ]) {
+      aiProxy.set((_seen, response) => {
+        json(response, 200, body);
+      });
+      assert.equal((await call("/api/chats", { headers })).status, 502);
+    }
+    aiProxy.set((_seen, response) => {
+      json(response, 200, { items: [{ ...message, role: "system" }], more: false });
+    });
+    assert.equal((await call(`/api/chats/${chatId}/messages`, { headers })).status, 502);
+    aiProxy.set((_seen, response) => {
+      json(response, 200, {});
+    });
+    assert.equal((await call(`/api/chats/${chatId}`, { method: "DELETE", headers })).status, 502);
   });
 });
